@@ -1194,6 +1194,7 @@
   .app.mobile-mode .sketch-card{padding:20px 14px;}
   .app.mobile-mode .sk-toolbar-bottom{justify-content:flex-start;}
 
+  :root{--sk-dur:.48s; --sk-ease:cubic-bezier(.32,.72,0,1);}
   /* ----- Maximize / minimize: the card zooms to full screen and back ----- */
   .sk-max-btn{display:inline-flex; align-items:center; gap:7px; margin-left:auto;}
   .sk-max-btn .sk-ico-min{display:none;}
@@ -1201,13 +1202,14 @@
   .sk-max-btn.is-max .sk-ico-min{display:inline;}
   .sketch-card .game-cta{
     overflow:hidden;
-    transition:max-height .42s cubic-bezier(.22,.9,.28,1), opacity .3s ease, margin .42s cubic-bezier(.22,.9,.28,1), padding .42s cubic-bezier(.22,.9,.28,1), border-width .42s ease;
+    transition:max-height var(--sk-dur) var(--sk-ease), opacity .3s ease, margin var(--sk-dur) var(--sk-ease), padding var(--sk-dur) var(--sk-ease), border-width var(--sk-dur) ease;
   }
   .sketch-card.sk-open .game-cta{max-height:0 !important; opacity:0; margin-top:0; margin-bottom:0; padding-top:0; padding-bottom:0; border-width:0;}
   .sketch-card.sk-fixed{
+    will-change:top, left, width, height;
     position:fixed; margin:0; z-index:910; display:flex; flex-direction:column;
-    transition:top .42s cubic-bezier(.22,.9,.28,1), left .42s cubic-bezier(.22,.9,.28,1), width .42s cubic-bezier(.22,.9,.28,1),
-               height .42s cubic-bezier(.22,.9,.28,1), padding .42s cubic-bezier(.22,.9,.28,1), border-radius .42s ease, box-shadow .42s ease;
+    transition:top var(--sk-dur) var(--sk-ease), left var(--sk-dur) var(--sk-ease), width var(--sk-dur) var(--sk-ease),
+               height var(--sk-dur) var(--sk-ease), padding var(--sk-dur) var(--sk-ease), border-radius var(--sk-dur) ease, box-shadow var(--sk-dur) ease;
   }
   .sketch-card.sk-fixed.sk-open{border-radius:18px; box-shadow:0 30px 90px rgba(15,29,29,.45);}
   .sketch-card.sk-fixed > *{flex:0 0 auto;}
@@ -1216,13 +1218,21 @@
   .sk-placeholder{width:100%;}
   .sk-backdrop{
     position:fixed; inset:0; z-index:900; background:rgba(30,58,58,.55);
-    opacity:0; transition:opacity .42s ease; -webkit-backdrop-filter:blur(3px); backdrop-filter:blur(3px);
+    opacity:0; transition:opacity var(--sk-dur) ease; 
   }
   .sk-backdrop.show{opacity:1;}
+  @media (min-width:700px){ .sk-backdrop{-webkit-backdrop-filter:blur(3px); backdrop-filter:blur(3px);} }
+  .sk-measure, .sk-measure *{transition:none !important;}
+  .sk-more{
+    position:absolute; left:50%; bottom:12px; transform:translateX(-50%); z-index:3; max-width:calc(100% - 24px);
+    padding:8px 14px; border-radius:999px; border:2px solid var(--teal); background:#fff; color:var(--ink);
+    font-size:12.5px; font-weight:700; box-shadow:0 6px 16px rgba(30,58,58,.18); cursor:pointer;
+  }
+  .sk-more[hidden]{display:none;}
   html.sk-lock, html.sk-lock body{overflow:hidden;}
   html.sk-lock{scrollbar-gutter:stable;}
   /* ----- Phones: edge-to-edge, compact toolbars, more room to draw ----- */
-  .sketch-card .game-badge, .sketch-card .game-title, .sketch-card .game-head{transition:all .42s cubic-bezier(.22,.9,.28,1);}
+  .sketch-card .game-badge, .sketch-card .game-title, .sketch-card .game-head{transition:all var(--sk-dur) var(--sk-ease);}
   .sketch-card.sk-fixed{overscroll-behavior:contain;}
   .sketch-card.sk-fixed .game-head{touch-action:none;}
   .sketch-card.sk-fixed .sk-toolbar{touch-action:pan-x;}
