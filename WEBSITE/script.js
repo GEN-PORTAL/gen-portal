@@ -1829,7 +1829,10 @@ function sketchClear(){
 const SK_ANIM_MS = 420;
 function skReducedMotion(){ return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
 function skMaxRect(){
-  const vw = document.documentElement.clientWidth, vh = window.innerHeight, m = vw < 700 ? 0 : 16;
+  const vv = window.visualViewport;
+  const vw = document.documentElement.clientWidth;
+  const vh = Math.round(vv && vv.height ? vv.height : window.innerHeight);   // follows the phone's URL bar / rotation
+  const m = vw < 700 ? 0 : 16;
   return { top:m, left:m, width:vw - m * 2, height:vh - m * 2 };
 }
 function skSetGeo(card, g){
@@ -1879,7 +1882,7 @@ function sketchMaximize(){
   document.documentElement.classList.add('sk-lock');
   card.classList.add('sk-open'); bd.classList.add('show');
   skSetGeo(card, skMaxRect());
-  window.addEventListener('resize', skOnResize);
+  skBindResize(true);
   skSetBtn(true);
   skAfterMove(card, () => { s.busy = false; sketchFit(); try{ s.canvas.focus({ preventScroll:true }); }catch(_){} });
 }
@@ -1887,7 +1890,7 @@ function sketchMinimize(){
   const s = sketch, card = document.querySelector('#sketchMount .sketch-card');
   if(!s || !card || !s.max || !s.ph) return;
   s.busy = true;
-  window.removeEventListener('resize', skOnResize);
+  skBindResize(false);
   const target = s.ph.getBoundingClientRect();
   card.classList.remove('sk-open');
   if(s.bd) s.bd.classList.remove('show');
@@ -1905,6 +1908,13 @@ function sketchMinimize(){
     sketchFit();
   });
 }
+function skOnRotate(){ setTimeout(skOnResize, 300); }     // phones report the new size a moment after rotating
+function skBindResize(on){
+  const act = on ? 'addEventListener' : 'removeEventListener';
+  window[act]('resize', skOnResize);
+  window[act]('orientationchange', skOnRotate);
+  if(window.visualViewport) window.visualViewport[act]('resize', skOnResize);
+}
 function skOnResize(){
   const card = document.querySelector('#sketchMount .sketch-card');
   if(card && sketch && sketch.max && !sketch.busy) skSetGeo(card, skMaxRect());
@@ -1912,7 +1922,7 @@ function skOnResize(){
 function sketchResetMax(){
   document.documentElement.classList.remove('sk-lock');
   document.querySelectorAll('.sk-backdrop').forEach(n => n.remove());
-  window.removeEventListener('resize', skOnResize);
+  skBindResize(false);
 }
 document.addEventListener('keydown', e => {
   if(e.key === 'Escape' && sketch && sketch.max && !sketch.busy) sketchMinimize();
