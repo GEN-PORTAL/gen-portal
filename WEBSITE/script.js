@@ -1605,6 +1605,7 @@ function skMid(a, b){ return { x:(a.x + b.x) / 2, y:(a.y + b.y) / 2 }; }
 function sketchInit(topic){
   const mount = document.getElementById('sketchMount');
   if(sketch && sketch.ro) sketch.ro.disconnect();
+  sketchResetMax();               // drop any leftover full-screen overlay from a previous lesson
   sketch = null;
   if(!mount) return;
 
@@ -1623,6 +1624,10 @@ function sketchInit(topic){
             <h3 class="game-title">${escapeHtml(topic.title)} Sketchpad</h3>
           </div>
         </div>
+        <button type="button" class="sk-btn sk-max-btn" id="skMaxBtn" onclick="sketchToggleMax()" aria-label="Maximize sketchpad" aria-pressed="false">
+          <svg class="sk-max-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path class="sk-ico-max" d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/><path class="sk-ico-min" d="M20 10h-6V4M4 14h6v6M14 10l7-7M10 14l-7 7"/></svg>
+          <span id="skMaxTxt">Maximize</span>
+        </button>
       </div>
       <div class="game-cta"><span>🧮</span><p>Work out your ${escapeHtml(topic.title.toLowerCase())} problems here: write the numbers, draw groups, or try a method. Use a finger, pen or mouse.</p></div>
 
@@ -1654,7 +1659,7 @@ function sketchInit(topic){
     </div>`;
 
   const cv = document.getElementById('skCanvas');
-  sketch = { topic, entry, canvas:cv, ctx:cv.getContext('2d'), dpr:1, cur:null, pid:null, ro:null };
+  sketch = { topic, entry, canvas:cv, ctx:cv.getContext('2d'), dpr:1, k:1, max:false, busy:false, ph:null, bd:null, cur:null, pid:null, ro:null };
   sketchBindCanvas();
 
   // The lesson page is hidden until everything is built, so size the canvas whenever it actually becomes visible.
@@ -1672,14 +1677,22 @@ function sketchFit(){
   const w = s.canvas.clientWidth, h = s.canvas.clientHeight;
   if(!w || !h) return;                       // still hidden
   const e = s.entry;
-  if(e.w && e.h && (e.w !== w || e.h !== h)){   // window resized or phone rotated: scale the drawing with it
-    const kx = w / e.w, ky = h / e.h;
-    e.strokes.concat(e.redo).forEach(st => { if(st.pts) st.pts.forEach(p => { p.x *= kx; p.y *= ky; }); });
+  if(s.max){
+    // Maximized = a zoom: the drawing keeps its shape and simply scales with the width.
+    s.k = e.w ? w / e.w : 1;
+  } else {
+    s.k = 1;
+    if(e.w && e.h && (e.w !== w || e.h !== h)){   // window resized or phone rotated: scale the drawing with it
+      const kx = w / e.w, ky = h / e.h;
+      e.strokes.concat(e.redo).forEach(st => { if(st.pts) st.pts.forEach(p => { p.x *= kx; p.y *= ky; }); });
+    }
+    e.w = w; e.h = h;
   }
-  e.w = w; e.h = h;
   s.dpr = window.devicePixelRatio || 1;
   const pw = Math.round(w * s.dpr), ph = Math.round(h * s.dpr);
   if(s.canvas.width !== pw || s.canvas.height !== ph){ s.canvas.width = pw; s.canvas.height = ph; }
+  const wrap = document.getElementById('skWrap');       // the grid / lines zoom together with the drawing
+  if(wrap) wrap.style.setProperty('--sk-k', s.k);
   sketchRedraw();
 }
 
@@ -1710,8 +1723,8 @@ function sketchDrawStroke(ctx, st){
 
 function sketchRedraw(){
   const s = sketch; if(!s) return;
-  const ctx = s.ctx, W = s.canvas.width / s.dpr, H = s.canvas.height / s.dpr;
-  ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
+  const ctx = s.ctx, sc = s.dpr * s.k, W = s.canvas.width / sc, H = s.canvas.height / sc;
+  ctx.setTransform(sc, 0, 0, sc, 0, 0);
   ctx.clearRect(0, 0, W, H);
   s.entry.strokes.forEach(st => {
     if(st.clear) ctx.clearRect(0, 0, W, H); else sketchDrawStroke(ctx, st);
@@ -1721,7 +1734,7 @@ function sketchRedraw(){
 // Draws just the newest bit of the stroke while the pen is moving (fast and smooth).
 function sketchLiveSegment(final){
   const s = sketch, st = s.cur, p = st.pts, n = p.length, ctx = s.ctx;
-  ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
+  ctx.setTransform(s.dpr * s.k, 0, 0, s.dpr * s.k, 0, 0);
   sketchStyle(ctx, st);
   ctx.beginPath();
   if(n === 1){
@@ -1741,10 +1754,11 @@ function sketchLiveSegment(final){
 
 function sketchBindCanvas(){
   const s = sketch, cv = s.canvas;
-  const pos = ev => { const r = cv.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; };
+  const pos = ev => { const r = cv.getBoundingClientRect(), k = s.k || 1; return { x: (ev.clientX - r.left) / k, y: (ev.clientY - r.top) / k }; };
 
   cv.addEventListener('pointerdown', e => {
     if(e.pointerType === 'mouse' && e.button !== 0) return;
+    if(s.busy) return;                 // wait for the zoom animation to finish before drawing
     e.preventDefault();
     cv.focus({ preventScroll:true });
     try{ cv.setPointerCapture(e.pointerId); }catch(_){}
@@ -1810,6 +1824,99 @@ function sketchClear(){
   sketch.entry.redo = [];
   sketchRedraw(); sketchSyncUI();
 }
+
+/* ---------- Maximize / minimize (zoom the sketchpad to full screen and back) ---------- */
+const SK_ANIM_MS = 420;
+function skReducedMotion(){ return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
+function skMaxRect(){
+  const vw = document.documentElement.clientWidth, vh = window.innerHeight, m = vw < 700 ? 0 : 16;
+  return { top:m, left:m, width:vw - m * 2, height:vh - m * 2 };
+}
+function skSetGeo(card, g){
+  card.style.top = g.top + 'px'; card.style.left = g.left + 'px';
+  card.style.width = g.width + 'px'; card.style.height = g.height + 'px';
+}
+// runs fn once the card has finished its size transition (with a safety timeout)
+function skAfterMove(card, fn){
+  let done = false;
+  const finish = () => { if(done) return; done = true; card.removeEventListener('transitionend', onEnd); fn(); };
+  const onEnd = e => { if(e.target === card && e.propertyName === 'width') finish(); };
+  card.addEventListener('transitionend', onEnd);
+  setTimeout(finish, skReducedMotion() ? 30 : SK_ANIM_MS + 160);
+}
+function skSetBtn(isMax){
+  const btn = document.getElementById('skMaxBtn'), txt = document.getElementById('skMaxTxt');
+  if(txt) txt.textContent = isMax ? 'Minimize' : 'Maximize';
+  if(btn){
+    btn.classList.toggle('is-max', isMax);
+    btn.setAttribute('aria-pressed', isMax ? 'true' : 'false');
+    btn.setAttribute('aria-label', isMax ? 'Minimize sketchpad' : 'Maximize sketchpad');
+  }
+}
+function sketchToggleMax(){
+  if(!sketch || sketch.busy || sketch.cur) return;
+  sketch.max ? sketchMinimize() : sketchMaximize();
+}
+function sketchMaximize(){
+  const s = sketch, card = document.querySelector('#sketchMount .sketch-card');
+  if(!s || !card) return;
+  s.busy = true;
+  const first = card.getBoundingClientRect();
+  // a placeholder keeps the page from jumping while the card floats above it
+  const ph = document.createElement('div');
+  ph.className = 'sk-placeholder'; ph.style.height = first.height + 'px';
+  card.parentNode.insertBefore(ph, card); s.ph = ph;
+  const bd = document.createElement('div');
+  bd.className = 'sk-backdrop'; bd.addEventListener('click', sketchToggleMax);
+  document.body.appendChild(bd); s.bd = bd;
+  const cta = card.querySelector('.game-cta');
+  if(cta) cta.style.maxHeight = cta.offsetHeight + 'px';
+  skSetGeo(card, first);                         // start exactly where the card already is
+  card.style.setProperty('--sk-r', getComputedStyle(card).borderTopLeftRadius);
+  card.classList.add('sk-fixed');
+  s.max = true;                                  // from now on the canvas scales as a zoom
+  void card.offsetWidth;                         // lock in the starting frame
+  document.documentElement.classList.add('sk-lock');
+  card.classList.add('sk-open'); bd.classList.add('show');
+  skSetGeo(card, skMaxRect());
+  window.addEventListener('resize', skOnResize);
+  skSetBtn(true);
+  skAfterMove(card, () => { s.busy = false; sketchFit(); try{ s.canvas.focus({ preventScroll:true }); }catch(_){} });
+}
+function sketchMinimize(){
+  const s = sketch, card = document.querySelector('#sketchMount .sketch-card');
+  if(!s || !card || !s.max || !s.ph) return;
+  s.busy = true;
+  window.removeEventListener('resize', skOnResize);
+  const target = s.ph.getBoundingClientRect();
+  card.classList.remove('sk-open');
+  if(s.bd) s.bd.classList.remove('show');
+  skSetGeo(card, target);
+  skSetBtn(false);
+  skAfterMove(card, () => {
+    card.classList.remove('sk-fixed');
+    ['top','left','width','height'].forEach(p => card.style[p] = '');
+    card.style.removeProperty('--sk-r');
+    const cta = card.querySelector('.game-cta'); if(cta) cta.style.maxHeight = '';
+    if(s.ph) s.ph.remove(); s.ph = null;
+    if(s.bd) s.bd.remove(); s.bd = null;
+    document.documentElement.classList.remove('sk-lock');
+    s.max = false; s.busy = false;
+    sketchFit();
+  });
+}
+function skOnResize(){
+  const card = document.querySelector('#sketchMount .sketch-card');
+  if(card && sketch && sketch.max && !sketch.busy) skSetGeo(card, skMaxRect());
+}
+function sketchResetMax(){
+  document.documentElement.classList.remove('sk-lock');
+  document.querySelectorAll('.sk-backdrop').forEach(n => n.remove());
+  window.removeEventListener('resize', skOnResize);
+}
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape' && sketch && sketch.max && !sketch.busy) sketchMinimize();
+});
 
 function sketchSyncUI(){
   const m = document.getElementById('sketchMount');
