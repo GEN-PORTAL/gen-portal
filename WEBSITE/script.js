@@ -1642,6 +1642,7 @@ function sketchInit(topic){
 
       <div class="sk-wrap sk-bg-${sketchPrefs.bg}" id="skWrap">
         <canvas class="sk-canvas" id="skCanvas" tabindex="0" aria-label="Sketchpad drawing area"></canvas>
+        <button type="button" class="sk-more" id="skMore" hidden onclick="sketchToggleMax()">✏️ More of your work is outside this view · Maximize to see it</button>
       </div>
 
       <div class="sk-toolbar sk-toolbar-bottom">
@@ -1678,8 +1679,8 @@ function sketchFit(){
   if(!w || !h) return;                       // still hidden
   const e = s.entry;
   if(s.max){
-    // Maximized = a zoom: the drawing keeps its shape and simply scales with the width.
-    s.k = e.w ? w / e.w : 1;
+    // Maximized = more room to write: the canvas gets bigger but the writing keeps its size and place.
+    s.k = 1;
   } else {
     s.k = 1;
     if(e.w && e.h && (e.w !== w || e.h !== h)){   // window resized or phone rotated: scale the drawing with it
@@ -1826,7 +1827,7 @@ function sketchClear(){
 }
 
 /* ---------- Maximize / minimize (zoom the sketchpad to full screen and back) ---------- */
-const SK_ANIM_MS = 420;
+const SK_ANIM_MS = 480;
 function skReducedMotion(){ return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
 function skMaxRect(){
   const vv = window.visualViewport;
@@ -1860,9 +1861,20 @@ function sketchToggleMax(){
   if(!sketch || sketch.busy || sketch.cur) return;
   sketch.max ? sketchMinimize() : sketchMaximize();
 }
+// While the card is growing/shrinking the canvas is pinned to one fixed size and simply revealed (clipped) by the card,
+// so nothing has to be resized or redrawn on every animation frame: that is what keeps the zoom smooth.
+function skPinCanvas(w, h){
+  const cv = sketch.canvas;
+  cv.style.position = 'absolute'; cv.style.inset = '0 auto auto 0';
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+}
+function skUnpinCanvas(){
+  const cv = sketch.canvas;
+  ['position','inset','width','height'].forEach(p => cv.style[p] = '');
+}
 function sketchMaximize(){
-  const s = sketch, card = document.querySelector('#sketchMount .sketch-card');
-  if(!s || !card) return;
+  const s = sketch, card = document.querySelector('#sketchMount .sketch-card'), wrap = document.getElementById('skWrap');
+  if(!s || !card || !wrap) return;
   s.busy = true;
   const first = card.getBoundingClientRect();
   // a placeholder keeps the page from jumping while the card floats above it
@@ -1874,38 +1886,55 @@ function sketchMaximize(){
   document.body.appendChild(bd); s.bd = bd;
   const cta = card.querySelector('.game-cta');
   if(cta) cta.style.maxHeight = cta.offsetHeight + 'px';
-  skSetGeo(card, first);                         // start exactly where the card already is
-  card.style.setProperty('--sk-r', getComputedStyle(card).borderTopLeftRadius);
-  card.classList.add('sk-fixed');
-  s.max = true;                                  // from now on the canvas scales as a zoom
-  void card.offsetWidth;                         // lock in the starting frame
+
+  // 1) measure how big the writing area will be once maximized (instantly, nothing is shown)
+  card.classList.add('sk-measure');
+  skSetGeo(card, first); card.classList.add('sk-fixed');
+  void card.offsetWidth;
+  skSetGeo(card, skMaxRect()); card.classList.add('sk-open');
+  void card.offsetWidth;
+  const fw = wrap.clientWidth, fh = wrap.clientHeight;
+  // 2) back to the starting frame
+  card.classList.remove('sk-open'); skSetGeo(card, first);
+  void card.offsetWidth;
+  card.classList.remove('sk-measure');
+
+  // 3) give the canvas its final size right away, then let the card grow over it
+  s.max = true;
+  skPinCanvas(fw, fh); sketchFit();
   document.documentElement.classList.add('sk-lock');
+  void card.offsetWidth;
   card.classList.add('sk-open'); bd.classList.add('show');
   skSetGeo(card, skMaxRect());
   skBindResize(true);
   skSetBtn(true);
-  skAfterMove(card, () => { s.busy = false; sketchFit(); try{ s.canvas.focus({ preventScroll:true }); }catch(_){} });
+  skAfterMove(card, () => {
+    skUnpinCanvas(); s.busy = false; sketchFit(); sketchSyncUI();
+    try{ s.canvas.focus({ preventScroll:true }); }catch(_){}
+  });
 }
 function sketchMinimize(){
   const s = sketch, card = document.querySelector('#sketchMount .sketch-card');
   if(!s || !card || !s.max || !s.ph) return;
   s.busy = true;
   skBindResize(false);
+  skPinCanvas(s.canvas.clientWidth, s.canvas.clientHeight);   // keep the big canvas while the card shrinks over it
   const target = s.ph.getBoundingClientRect();
   card.classList.remove('sk-open');
   if(s.bd) s.bd.classList.remove('show');
   skSetGeo(card, target);
   skSetBtn(false);
   skAfterMove(card, () => {
+    s.max = false;
+    skUnpinCanvas();
     card.classList.remove('sk-fixed');
     ['top','left','width','height'].forEach(p => card.style[p] = '');
-    card.style.removeProperty('--sk-r');
     const cta = card.querySelector('.game-cta'); if(cta) cta.style.maxHeight = '';
     if(s.ph) s.ph.remove(); s.ph = null;
     if(s.bd) s.bd.remove(); s.bd = null;
     document.documentElement.classList.remove('sk-lock');
-    s.max = false; s.busy = false;
-    sketchFit();
+    s.busy = false;
+    sketchFit(); sketchSyncUI();
   });
 }
 function skOnRotate(){ setTimeout(skOnResize, 300); }     // phones report the new size a moment after rotating
@@ -1928,6 +1957,18 @@ document.addEventListener('keydown', e => {
   if(e.key === 'Escape' && sketch && sketch.max && !sketch.busy) sketchMinimize();
 });
 
+// True when there is writing outside the small (minimized) view, e.g. done while maximized.
+function sketchOverflow(){
+  const s = sketch; if(!s || s.max) return false;
+  const e = s.entry; if(!e.w || !e.h) return false;
+  for(let i = e.strokes.length - 1; i >= 0; i--){
+    const st = e.strokes[i];
+    if(st.clear) break;
+    if(st.pts && st.pts.some(p => p.x > e.w + 6 || p.y > e.h + 6)) return true;
+  }
+  return false;
+}
+
 function sketchSyncUI(){
   const m = document.getElementById('sketchMount');
   if(!m || !sketch) return;
@@ -1940,6 +1981,7 @@ function sketchSyncUI(){
   const size = document.getElementById('skSize'), val = document.getElementById('skSizeVal');
   if(size) size.value = P.size;
   if(val) val.textContent = P.size;
+  const more = document.getElementById('skMore'); if(more) more.hidden = !sketchOverflow();
   document.getElementById('skUndo').disabled = !e.strokes.length;
   document.getElementById('skRedo').disabled = !e.redo.length;
   document.getElementById('skClear').disabled = !sketchHasInk();
