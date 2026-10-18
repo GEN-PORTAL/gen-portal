@@ -423,11 +423,13 @@ function selectTheme(index){
 function goToTheme(targetIndex){
   const nextTheme = themes[targetIndex];
 
-  // flowing-wave flourish on the logo icon
-  const wave = document.getElementById('wavePath');
-  wave.classList.remove('wave-spin');
-  void wave.offsetWidth; // restart animation
-  wave.classList.add('wave-spin');
+  // little bounce on the logo
+  const logoImg = document.getElementById('logoImg');
+  if(logoImg){
+    logoImg.classList.remove('logo-pop');
+    void logoImg.offsetWidth; // restart animation
+    logoImg.classList.add('logo-pop');
+  }
 
   // ripple that expands from the logo and reveals the new palette
   const btn = document.getElementById('logoBtn');
