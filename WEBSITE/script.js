@@ -241,7 +241,7 @@ auth.onAuthStateChanged(async (user)=>{
       document.getElementById('loginModalOverlay').classList.add('show');
     } else {
       const data = snap.data();
-      currentUser = {uid:user.uid, email:user.email, name:data.displayName};
+      currentUser = {uid:user.uid, email:user.email, name:data.displayName, section:data.section || ''};
       const streak = await syncDailyStreak(user.uid, data);
       applySignedInUI(data.displayName, user.email, data.moduleProgress || {}, streak);
 
@@ -300,7 +300,7 @@ async function confirmDisplayName(){
     createdAt: firebase.firestore.FieldValue.serverTimestamp()
   }, {merge:true});
 
-  currentUser = {uid:user.uid, email:user.email, name:nameInput};
+  currentUser = {uid:user.uid, email:user.email, name:nameInput, section:''};
   activeDays = new Set([dayKey(new Date())]);
   renderStreakCalendar();
   applySignedInUI(nameInput, user.email, {}, 1);
@@ -324,6 +324,7 @@ function applySignedInUI(displayName, email, moduleProgress, streak){
   document.getElementById('editNameBtn').style.display = 'inline-block';
 
   document.getElementById('statStreak').textContent = streak;
+  renderSectionPicker();
 
   // apply this user's saved progress onto the shared module list, then re-render
   modules.forEach(m=>{
@@ -345,6 +346,7 @@ function showSignedOutUI(){
   cancelEditingName();
   document.getElementById('statStreak').textContent = '0';
   document.getElementById('notifToggle').setAttribute('aria-checked', 'true');
+  renderSectionPicker();
 }
 
 /* ---------- Edit display name ---------- */
@@ -1126,77 +1128,274 @@ function describeActivity(a){
   return escapeHtml(a.type);
 }
 
+/* ================= SECTIONS (profile picker + admin grouping) ================= */
+// Section list: grouped by strand, colours follow the school's section chart.
+const SECTION_STRANDS = [
+  { id:'medical',     name:'Medical Sciences', emoji:'🩺', color:'#1C8F52', dark:'#126B3A', tint:'#E2F5EA', ink:'#FFFFFF', lightText:true,
+    sections:[ {id:'medical-sciences', label:'11 - Medical Sciences'} ] },
+  { id:'engineering', name:'Engineering',      emoji:'⚙️', color:'#A3D44F', dark:'#7FAE2E', tint:'#F1F9E1', ink:'#20330C', lightText:false,
+    sections:[ {id:'engineering-1', label:'11 - Engineering 1'}, {id:'engineering-2', label:'11 - Engineering 2'} ] },
+  { id:'humanities',  name:'Humanities',       emoji:'📚', color:'#5E6EE6', dark:'#4553C4', tint:'#ECEEFF', ink:'#FFFFFF', lightText:true,
+    sections:[ {id:'humanities-1', label:'11 - Humanities 1'}, {id:'humanities-2', label:'11 - Humanities 2'} ] },
+  { id:'social',      name:'Social Science',   emoji:'🌍', color:'#8E5CE0', dark:'#6F42BF', tint:'#F2EAFF', ink:'#FFFFFF', lightText:true,
+    sections:[ {id:'social-science-1', label:'11 - Social Science 1'}, {id:'social-science-2', label:'11 - Social Science 2'} ] },
+  { id:'ict',         name:'ICT',              emoji:'💻', color:'#F7A998', dark:'#DC8470', tint:'#FFEEE9', ink:'#4A1D12', lightText:false,
+    sections:[ {id:'ict-1', label:'11 - ICT 1'}, {id:'ict-2', label:'11 - ICT 2'} ] },
+  { id:'fcs',         name:'FCS',              emoji:'🍳', color:'#F7D26B', dark:'#D9AE3C', tint:'#FFF7DC', ink:'#4A3808', lightText:false,
+    sections:[ {id:'fcs-1', label:'11 - FCS 1'}, {id:'fcs-2', label:'11 - FCS 2'} ] }
+];
+const SECTIONS = SECTION_STRANDS.flatMap(g => g.sections.map(s => ({ ...s, strand:g })));
+const SECTION_BY_ID = Object.fromEntries(SECTIONS.map(s => [s.id, s]));
+function secVars(g){ return `--sc:${g.color}; --sd:${g.dark}; --st:${g.tint}; --si:${g.ink};`; }
+
+let secStatusTimer = null;
+function setSecStatus(text, kind){
+  const el = document.getElementById('secStatus'); if(!el) return;
+  clearTimeout(secStatusTimer);
+  el.className = 'sec-status' + (text ? ' show ' + (kind || 'ok') : '');
+  el.textContent = text || '';
+  if(text && kind !== 'err') secStatusTimer = setTimeout(() => { el.className = 'sec-status'; }, 4200);
+}
+
+// Draws the section buttons on the Profile tab, plus the badge and the Home reminder.
+function renderSectionPicker(popId){
+  const host = document.getElementById('secGroups'); if(!host) return;
+  const signedIn = !!currentUser;
+  const cur = signedIn ? (currentUser.section || '') : '';
+  host.innerHTML = SECTION_STRANDS.map(g => `
+    <div class="sec-group" style="${secVars(g)}">
+      <div class="sec-group-name"><i></i><span>${g.emoji} ${escapeHtml(g.name)}</span></div>
+      <div class="sec-opts">
+        ${g.sections.map(s => `<button type="button" class="sec-btn${cur === s.id ? ' selected' : ''}${popId === s.id ? ' pop' : ''}"
+            data-sec="${s.id}" onclick="selectSection('${s.id}')" ${signedIn ? '' : 'disabled'} aria-pressed="${cur === s.id}">
+            <span class="sec-btn-dot"></span>
+            <span class="sec-btn-label">${escapeHtml(s.label)}</span>
+            <svg class="sec-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>`).join('')}
+      </div>
+    </div>`).join('');
+
+  const hint = document.getElementById('secHint');
+  if(hint){
+    hint.textContent = !signedIn ? 'Sign in with Google to choose your section.'
+      : cur ? `You are in ${SECTION_BY_ID[cur].label}. Tap another section if you need to switch.`
+            : 'Tap the section you belong to. Your teacher will see you in that group.';
+  }
+  const count = document.getElementById('secCount');
+  if(count) count.textContent = cur ? '' : (signedIn ? 'Not chosen yet' : '');
+  const clr = document.getElementById('secClearBtn'); if(clr) clr.hidden = !cur;
+
+  const badge = document.getElementById('profileSectionBadge');
+  if(badge){
+    if(cur){
+      const s = SECTION_BY_ID[cur];
+      badge.hidden = false; badge.setAttribute('style', secVars(s.strand));
+      badge.textContent = `${s.strand.emoji} ${s.label}`;
+    } else badge.hidden = true;
+  }
+  const banner = document.getElementById('secBanner');
+  if(banner) banner.style.display = (signedIn && !cur) ? 'flex' : 'none';
+}
+
+// small burst of sparkles from the button that was just chosen
+function secBurst(id){
+  const btn = document.querySelector(`.sec-btn[data-sec="${id}"]`); if(!btn) return;
+  for(let i = 0; i < 10; i++){
+    const sp = document.createElement('span');
+    const ang = (Math.PI * 2 * i) / 10 + Math.random() * .4, dist = 34 + Math.random() * 26;
+    sp.className = 'sec-spark';
+    sp.style.setProperty('--dx', Math.cos(ang) * dist + 'px');
+    sp.style.setProperty('--dy', Math.sin(ang) * dist + 'px');
+    btn.appendChild(sp);
+    setTimeout(() => sp.remove(), 800);
+  }
+}
+
+async function selectSection(id){
+  const sec = SECTION_BY_ID[id];
+  if(!sec) return;
+  if(!currentUser){ setSecStatus('Please sign in with Google first.', 'err'); return; }
+  if(currentUser.section === id) return;
+  const previous = currentUser.section || '';
+  currentUser.section = id;
+  renderSectionPicker(id);
+  secBurst(id);
+  try{
+    await db.collection('users').doc(currentUser.uid).set(
+      { section: id, sectionLabel: sec.label, sectionUpdatedAt: Date.now() }, { merge:true });
+    setSecStatus(`Saved! You're now in ${sec.label}.`, 'ok');
+  }catch(err){
+    console.error(err);
+    currentUser.section = previous;
+    renderSectionPicker();
+    setSecStatus("Couldn't save your section. Check your connection and try again.", 'err');
+  }
+}
+
+async function clearSection(){
+  if(!currentUser || !currentUser.section) return;
+  const previous = currentUser.section;
+  currentUser.section = '';
+  renderSectionPicker();
+  try{
+    await db.collection('users').doc(currentUser.uid).set(
+      { section: firebase.firestore.FieldValue.delete(), sectionLabel: firebase.firestore.FieldValue.delete() }, { merge:true });
+    setSecStatus('Your section was removed.', 'info');
+  }catch(err){
+    console.error(err);
+    currentUser.section = previous;
+    renderSectionPicker();
+    setSecStatus("Couldn't remove your section. Please try again.", 'err');
+  }
+}
+renderSectionPicker();
+
+/* ---------- ADMIN: students grouped by section ---------- */
+function timeAgo(ms){
+  if(!ms) return 'never';
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if(s < 60) return 'just now';
+  if(s < 3600) return Math.floor(s / 60) + 'm ago';
+  if(s < 86400) return Math.floor(s / 3600) + 'h ago';
+  if(s < 172800) return 'yesterday';
+  if(s < 2592000) return Math.floor(s / 86400) + 'd ago';
+  return new Date(ms).toLocaleDateString(undefined, {month:'short', day:'numeric'});
+}
+
+let adminData = { students: [] };
+let adminFilter = 'all';
+const adminCollapsed = new Set();
+
 async function loadAdminDashboard(){
   if(!currentUser || currentUser.email !== ADMIN_EMAIL) return;
-
   const loading = document.getElementById('adminLoadingMsg');
-  const table = document.getElementById('adminStudentTable');
-  loading.style.display = 'block';
-  loading.style.color = '';
-  loading.textContent = 'Loading student data...';
-  table.style.display = 'none';
+  loading.style.display = 'block'; loading.style.color = ''; loading.textContent = 'Loading student data...';
 
   try{
     const usersSnap = await db.collection('users').get();
-
     const students = await Promise.all(usersSnap.docs.map(async doc=>{
       const u = doc.data();
-      const userRef = db.collection('users').doc(doc.id);
-      const activitySnap = await userRef.collection('activity').orderBy('at', 'desc').limit(40).get();
-
+      const activitySnap = await db.collection('users').doc(doc.id).collection('activity').orderBy('at', 'desc').limit(40).get();
       const name = u.displayName || u.email || '(no name)';
+
+      // mini-game plays only, newest first; repeats are merged into one chip with a count (x2)
+      const plays = activitySnap.docs.map(a=>a.data())
+        .filter(a=> a.type === 'game_played')
+        .map(a=>({ label: a.detail || 'Mini game', ms: (a.at && a.at.toMillis) ? a.at.toMillis() : 0 }))
+        .sort((x,y)=> y.ms - x.ms);
+      const counts = new Map();
+      plays.forEach(p=> counts.set(p.label, (counts.get(p.label) || 0) + 1));
+
       return {
-        name, email: u.email || '', level: u.level || '—', streak: calcStreaks(new Set(Array.isArray(u.activeDays) ? u.activeDays : [])).current,
+        id: doc.id, name, email: u.email || '', section: SECTION_BY_ID[u.section] ? u.section : '',
+        streak: calcStreaks(new Set(Array.isArray(u.activeDays) ? u.activeDays : [])).current,
         lastActive: u.lastSeenAt || u.lastLoginTimestamp || 0,
-        activity: activitySnap.docs.map(a=>({...a.data(), student: name}))
+        chips: [...counts.entries()], lastPlay: plays[0] || null
       };
     }));
-
     students.sort((a,b)=> b.lastActive - a.lastActive);
+    adminData = { students };
 
     const dayAgo = Date.now() - 24*60*60*1000;
+    const assigned = students.filter(s=> s.section);
     document.getElementById('adminStudentCount').textContent = `${students.length} student${students.length === 1 ? '' : 's'}`;
     document.getElementById('adminTotalStudents').textContent = students.length;
     document.getElementById('adminActiveToday').textContent = students.filter(s=> s.lastActive > dayAgo).length;
-
-    document.getElementById('adminStudentRows').innerHTML = students.length
-      ? students.map(s=>`<tr>
-          <td>${escapeHtml(s.name)}</td>
-          <td>${escapeHtml(s.email)}</td>
-          <td>${escapeHtml(s.level)}</td>
-          <td>${s.streak} 🔥</td>
-          <td>${formatWhen(s.lastActive)}</td>
-        </tr>`).join('')
-      : '<tr><td colspan="5">No students yet.</td></tr>';
-
-    // One row per student (name shown once). Only mini-game plays count; repeats are merged into "x2".
-    const feed = students.map(s=>{
-      const plays = s.activity
-        .filter(a=> a.type === 'game_played')
-        .map(a=>({...a, ms: (a.at && a.at.toMillis) ? a.at.toMillis() : 0}))
-        .sort((x,y)=> y.ms - x.ms);
-      if(!plays.length) return null;
-      const counts = new Map();                       // keeps most-recent-first order
-      plays.forEach(p=>{ const k = p.detail || 'Mini game'; counts.set(k, (counts.get(k) || 0) + 1); });
-      return { student: s.name, ms: plays[0].ms, items: [...counts.entries()] };
-    }).filter(Boolean).sort((x,y)=> y.ms - x.ms).slice(0, 20);
-
-    document.getElementById('adminActivityList').innerHTML = feed.length
-      ? feed.map(r=>`<div class="admin-activity-row">
-          <span class="aa-time">${formatWhen(r.ms)}</span>
-          <span class="aa-body"><strong>${escapeHtml(r.student)}</strong> played
-            ${r.items.map(([label, n])=>`<span class="aa-chip">${escapeHtml(label)}${n > 1 ? ` <b>\u00D7${n}</b>` : ''}</span>`).join('')}
-          </span>
-        </div>`).join('')
-      : '<p class="admin-intro">No activity recorded yet. It appears when students play the mini game.</p>';
+    document.getElementById('adminAssigned').textContent = assigned.length;
+    document.getElementById('adminSectionsUsed').textContent = new Set(assigned.map(s=> s.section)).size;
 
     loading.style.display = 'none';
-    table.style.display = 'table';
+    renderAdminFilters();
+    renderAdminSections(true);
   } catch(err){
     console.error(err);
     loading.style.color = 'var(--orange-dark)';
     loading.textContent = `Couldn't load student data (${err.message}). Make sure the admin Firestore rules have been published.`;
   }
+}
+
+function renderAdminFilters(){
+  const st = adminData.students;
+  const countFor = g => st.filter(s=> s.section && SECTION_BY_ID[s.section].strand.id === g.id).length;
+  const pills = [`<button type="button" class="adm-filter${adminFilter === 'all' ? ' active' : ''}" onclick="setAdminFilter('all')">All sections <b>${st.length}</b></button>`]
+    .concat(SECTION_STRANDS.map(g=>
+      `<button type="button" class="adm-filter${adminFilter === g.id ? ' active' : ''}" style="${secVars(g)}" onclick="setAdminFilter('${g.id}')"><i></i>${g.emoji} ${escapeHtml(g.name)} <b>${countFor(g)}</b></button>`))
+    .concat([`<button type="button" class="adm-filter${adminFilter === 'none' ? ' active' : ''}" style="--sc:#7D8F8F; --si:#fff;" onclick="setAdminFilter('none')"><i></i>No section yet <b>${st.filter(s=> !s.section).length}</b></button>`]);
+  document.getElementById('adminFilters').innerHTML = pills.join('');
+}
+function setAdminFilter(key){ adminFilter = key; renderAdminFilters(); renderAdminSections(true); }
+function toggleAdminSection(id){
+  adminCollapsed.has(id) ? adminCollapsed.delete(id) : adminCollapsed.add(id);
+  const card = document.querySelector(`.adm-card[data-sec="${id}"]`);
+  if(card){
+    card.classList.toggle('collapsed', adminCollapsed.has(id));
+    const h = card.querySelector('.adm-head'); if(h) h.setAttribute('aria-expanded', !adminCollapsed.has(id));
+  }
+}
+
+function adminStudentRow(s, g){
+  const active = s.lastActive > Date.now() - 24*60*60*1000;
+  const shown = s.chips.slice(0, 6), more = s.chips.length - shown.length;
+  const chips = shown.length
+    ? shown.map(([label, n])=> `<span class="aa-chip">${escapeHtml(label)}${n > 1 ? ` <b>\u00D7${n}</b>` : ''}</span>`).join('') + (more > 0 ? `<span class="aa-chip more">+${more} more</span>` : '')
+    : '<span class="adm-none">No mini-game activity yet</span>';
+  return `<div class="adm-stu">
+      <div class="adm-stu-top">
+        <div class="adm-av" style="background:${g.color}; color:${g.ink};">${escapeHtml(getInitials(s.name))}</div>
+        <div class="adm-stu-id"><b>${escapeHtml(s.name)}</b><span>${escapeHtml(s.email)}</span></div>
+        <div class="adm-stu-meta">
+          <span class="adm-streak" title="Day streak">🔥 ${s.streak}</span>
+          <span class="adm-seen${active ? ' on' : ''}"><i></i>${timeAgo(s.lastActive)}</span>
+        </div>
+      </div>
+      <div class="adm-chips"><span class="adm-chips-ico" title="Recent activity">🎮</span>${chips}</div>
+    </div>`;
+}
+
+function adminCard(id, title, emoji, g, students, idx, animate, extraClass){
+  const dayAgo = Date.now() - 24*60*60*1000;
+  const activeCount = students.filter(s=> s.lastActive > dayAgo).length;
+  let latest = null;
+  students.forEach(s=>{ if(s.lastPlay && (!latest || s.lastPlay.ms > latest.ms)) latest = { ms:s.lastPlay.ms, label:s.lastPlay.label, name:s.name }; });
+  const sub = students.length ? `${students.length} student${students.length === 1 ? '' : 's'}${activeCount ? ` · ${activeCount} active today` : ''}` : 'No students yet';
+  const body = students.length
+    ? `<div class="adm-latest">${latest
+          ? `⚡ <span>Latest: <b>${escapeHtml(latest.name)}</b> played <b>${escapeHtml(latest.label)}</b> · ${timeAgo(latest.ms)}</span>`
+          : '💤 <span>No mini-game activity in this section yet</span>'}</div>
+       ${students.map(s=> adminStudentRow(s, g)).join('')}`
+    : '<div class="adm-empty"><span>🪑</span>No one has joined this section yet.</div>';
+  const collapsed = adminCollapsed.has(id);
+  return `<div class="adm-card ${g.lightText ? 'ink-light' : 'ink-dark'}${extraClass || ''}${collapsed ? ' collapsed' : ''}${animate ? '' : ' no-anim'}" data-sec="${id}" style="${secVars(g)} --i:${idx};">
+      <button type="button" class="adm-head" onclick="toggleAdminSection('${id}')" aria-expanded="${!collapsed}">
+        <span class="adm-ico">${emoji}</span>
+        <span class="adm-title"><h4>${escapeHtml(title)}</h4><small>${sub}</small></span>
+        <span class="adm-count">${students.length}</span>
+        <svg class="adm-chev" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="adm-body-wrap"><div class="adm-body">${body}</div></div>
+    </div>`;
+}
+
+function renderAdminSections(animate){
+  const host = document.getElementById('adminSections'); if(!host) return;
+  const q = (document.getElementById('adminSearch')?.value || '').trim().toLowerCase();
+  const match = s => !q || s.name.toLowerCase().includes(q) || s.email.toLowerCase().includes(q);
+  const cards = [];
+  if(adminFilter !== 'none'){
+    SECTIONS.forEach(sec=>{
+      if(adminFilter !== 'all' && sec.strand.id !== adminFilter) return;
+      const list = adminData.students.filter(s=> s.section === sec.id && match(s));
+      if(q && !list.length) return;                      // while searching, only show sections with a match
+      cards.push(adminCard(sec.id, sec.label, sec.strand.emoji, sec.strand, list, cards.length, animate));
+    });
+  }
+  if(adminFilter === 'all' || adminFilter === 'none'){
+    const list = adminData.students.filter(s=> !s.section && match(s));
+    if(list.length) cards.push(adminCard('none', 'No section yet', '❔',
+      { color:'#7D8F8F', dark:'#5F7272', tint:'#EEF2F1', ink:'#FFFFFF', lightText:true }, list, cards.length, animate, ' adm-unassigned'));
+  }
+  host.innerHTML = cards.length ? cards.join('')
+    : `<div class="adm-nothing">${q ? '🔍 No student matches your search.' : 'No students to show here yet.'}</div>`;
 }
 
 
