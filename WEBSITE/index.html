@@ -62,6 +62,12 @@
           <button class="btn-3d hero-cta" onclick="chooseLevel('beginner')"><span class="ico">✨</span> Start Learning</button>
         </div>
 
+        <div class="sec-banner" id="secBanner" style="display:none;">
+          <span class="sec-banner-ico">🎒</span>
+          <div class="sec-banner-text"><b>Pick your section</b><span>So your teacher can find you in the right group.</span></div>
+          <button type="button" onclick="goToPage('profile')">Choose</button>
+        </div>
+
         <div class="home-extras">
           <!-- Interactive warm-up -->
           <div class="section-label"><h3>Quick warm-up</h3></div>
@@ -336,6 +342,7 @@
               <button class="lecture-action-btn" style="padding:8px 14px; font-size:12px;" onclick="cancelEditingName()">Cancel</button>
             </div>
             <p class="objective" id="profileEmail">Sign in with Gmail to save your progress</p>
+            <div class="sec-badge" id="profileSectionBadge" hidden></div>
           </div>
         </div>
         <div class="setting-row">
@@ -351,7 +358,17 @@
         <button class="start-btn" style="align-self:flex-start;" onclick="profileAction()" id="profileSignInBtn">Sign in with Google</button>
       </div>
 
-      <div class="section-label" style="margin-top:0;"><h3>Your Stats</h3></div>
+      <div class="section-label" style="margin-top:0;"><h3>Your Section</h3><span class="count" id="secCount"></span></div>
+      <div class="sec-card" id="sectionPicker">
+        <p class="sec-hint" id="secHint">Sign in with Google to choose your section.</p>
+        <div id="secGroups"></div>
+        <div class="sec-foot">
+          <div class="sec-status" id="secStatus" role="status" aria-live="polite"></div>
+          <button type="button" class="sec-clear" id="secClearBtn" onclick="clearSection()" hidden>Remove my section</button>
+        </div>
+      </div>
+
+      <div class="section-label" style="margin-top:34px;"><h3>Your Stats</h3></div>
       <div class="stats-row">
         <div class="stat-card"><div class="num" id="statStreak">0</div><div class="label">Day streak</div></div>
       </div>
@@ -365,24 +382,24 @@
       </div>
       <p class="admin-intro">Everything your students do on GEN. Only your account can see this page.</p>
 
-      <div class="stats-row">
+      <div class="stats-row adm-stats">
         <div class="stat-card"><div class="num" id="adminTotalStudents">0</div><div class="label">Total students</div></div>
         <div class="stat-card"><div class="num" id="adminActiveToday">0</div><div class="label">Active in last 24h</div></div>
+        <div class="stat-card"><div class="num" id="adminAssigned">0</div><div class="label">Have chosen a section</div></div>
+        <div class="stat-card"><div class="num" id="adminSectionsUsed">0</div><div class="label">Sections in use</div></div>
       </div>
 
-      <div class="section-label"><h3>Students</h3></div>
+      <div class="section-label"><h3>Sections</h3><span class="count">Students and their recent activity, grouped by the section they picked</span></div>
+      <div class="adm-toolbar">
+        <label class="adm-search">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input type="search" id="adminSearch" placeholder="Search a student by name or email" oninput="renderAdminSections(false)" autocomplete="off">
+        </label>
+        <button type="button" class="adm-refresh" onclick="loadAdminDashboard()">↻ Refresh</button>
+      </div>
+      <div class="adm-filters" id="adminFilters"></div>
       <div id="adminLoadingMsg" class="admin-intro">Loading student data...</div>
-      <div style="overflow-x:auto;">
-        <table class="admin-table" id="adminStudentTable" style="display:none;">
-          <thead>
-            <tr><th>Name</th><th>Email</th><th>Level</th><th>Streak</th><th>Last active</th></tr>
-          </thead>
-          <tbody id="adminStudentRows"></tbody>
-        </table>
-      </div>
-
-      <div class="section-label"><h3>Recent activity</h3></div>
-      <div id="adminActivityList" class="admin-activity"></div>
+      <div class="adm-sections" id="adminSections"></div>
     </section>
   </main>
 
