@@ -59,6 +59,15 @@
   .brand{display:flex; align-items:center; gap:10px;}
   .brand h1{font-size:22px; color:var(--ink); letter-spacing:.5px;}
   .brand-icon{width:34px; height:34px;}
+  .brand-logo{height:44px; width:auto; display:block; flex-shrink:0; transform-origin:50% 60%;}
+  .app.mobile-mode .brand-logo{height:38px;}
+  .logo-pop{animation:logoPop .8s cubic-bezier(.34,1.56,.64,1);}
+  @keyframes logoPop{
+    0%{transform:scale(1) rotate(0);}
+    35%{transform:scale(1.22) rotate(-8deg);}
+    70%{transform:scale(.96) rotate(3deg);}
+    100%{transform:scale(1) rotate(0);}
+  }
 
   .theme-ripple{
     position:fixed; border-radius:50%; pointer-events:none; z-index:200; opacity:0;
@@ -855,6 +864,7 @@
   }
   .hf-brand{display:flex; align-items:center; gap:8px; font-size:14px; color:var(--ink-soft);}
   .hf-brand svg{width:26px; height:26px;}
+  .hf-logo{height:30px; width:auto; display:block;}
   .hf-brand b{font-family:'Fredoka',sans-serif; font-size:20px; color:var(--ink);}
   .hf-chips{display:flex; flex-wrap:wrap; justify-content:center; gap:8px;}
   .hf-chips span{font-size:12.5px; font-weight:600; padding:6px 14px; border-radius:999px; background:var(--surface); color:var(--ink-soft);}
