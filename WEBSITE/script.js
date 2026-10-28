@@ -219,13 +219,77 @@ function signInWithGoogle(){
 }
 
 function handleUserChipClick(){
-  if(confirm("Sign out of GEN?")) auth.signOut();
+  if(confirm("Sign out of BITS?")) auth.signOut();
 }
 
 function profileAction(){
   if(currentUser) auth.signOut();
   else signInWithGoogle();
 }
+
+/* ================= CLASS SECTION (ICT - A / ICT - B) =================
+   Students pick the class they belong to (Home page and Profile page). It is saved on their account as
+   users/{uid}.classSection, so the Admin tab can group students by section and show each section's recent activity.
+   To add another class later, just add it to this list, for example 'ICT - C'. */
+const CLASS_SECTIONS = ['ICT - A', 'ICT - B'];
+const CLASS_PENDING_KEY = 'bitsClassSectionPending';   // only used when a student picks BEFORE signing in
+let classSection = null;
+
+function classPendingGet(){ try{ const v = localStorage.getItem(CLASS_PENDING_KEY); return CLASS_SECTIONS.indexOf(v) >= 0 ? v : null; }catch(_){ return null; } }
+function classPendingSet(v){ try{ if(v) localStorage.setItem(CLASS_PENDING_KEY, v); else localStorage.removeItem(CLASS_PENDING_KEY); }catch(_){} }
+
+function renderClassPickers(){
+  document.querySelectorAll('.class-pick').forEach(box => {
+    const opts = box.querySelector('.cp-options'), note = box.querySelector('.cp-note');
+    box.classList.toggle('need', !classSection);
+    if(opts) opts.innerHTML = CLASS_SECTIONS.map(label => {
+      const on = label === classSection, letter = label.split(' - ').pop();
+      return `<button type="button" class="cp-opt ${on ? 'on' : ''}" role="radio" aria-checked="${on}" data-sec="${escapeHtml(label)}" onclick="setClassSection(this.dataset.sec)">
+        <span class="cp-letter" aria-hidden="true">${escapeHtml(letter)}</span>
+        <span class="cp-name">${escapeHtml(label)}</span>
+        <span class="cp-check" aria-hidden="true">\u2713</span>
+      </button>`;
+    }).join('');
+    if(note){
+      note.classList.remove('err');
+      note.textContent = !classSection ? ''
+        : currentUser ? `\u2705 You are in ${classSection}. Picked the wrong one? Tap another section to change it.`
+        : `You picked ${classSection}. Sign in with Google so your teacher can see your progress.`;
+    }
+  });
+}
+
+async function setClassSection(label){
+  if(CLASS_SECTIONS.indexOf(label) < 0 || label === classSection) return;
+  const prev = classSection;
+  classSection = label; renderClassPickers();
+  if(!currentUser){ classPendingSet(label); return; }
+  try{
+    await db.collection('users').doc(currentUser.uid).set({ classSection: label, classSectionAt: Date.now() }, {merge:true});
+    logActivity('class_selected', prev ? `${label} (was ${prev})` : label, { classSection: label });
+  }catch(err){
+    console.error(err);
+    classSection = prev; renderClassPickers();
+    document.querySelectorAll('.class-pick .cp-note').forEach(n => { n.textContent = 'Could not save your class section. Check your connection and try again.'; n.classList.add('err'); });
+  }
+}
+
+// Called right after a student signs in: use the saved section, or save the one they picked before signing in.
+function classSectionOnSignIn(data){
+  const saved = data && CLASS_SECTIONS.indexOf(data.classSection) >= 0 ? data.classSection : null;
+  const pending = classPendingGet();
+  if(saved){ classSection = saved; classPendingSet(null); }
+  else if(pending){
+    classSection = pending; classPendingSet(null);
+    db.collection('users').doc(currentUser.uid).set({ classSection: pending, classSectionAt: Date.now() }, {merge:true})
+      .then(() => logActivity('class_selected', pending, { classSection: pending })).catch(console.error);
+  } else classSection = null;
+  renderClassPickers();
+}
+function classSectionOnSignOut(){ classSection = classPendingGet(); renderClassPickers(); }
+
+classSection = classPendingGet();
+renderClassPickers();
 
 // Fires automatically whenever sign-in state changes (page load, login, logout)
 auth.onAuthStateChanged(async (user)=>{
@@ -241,7 +305,7 @@ auth.onAuthStateChanged(async (user)=>{
       document.getElementById('loginModalOverlay').classList.add('show');
     } else {
       const data = snap.data();
-      currentUser = {uid:user.uid, email:user.email, name:data.displayName, section:data.section || ''};
+      currentUser = {uid:user.uid, email:user.email, name:data.displayName};
       const streak = await syncDailyStreak(user.uid, data);
       applySignedInUI(data.displayName, user.email, data.moduleProgress || {}, streak);
 
@@ -252,6 +316,7 @@ auth.onAuthStateChanged(async (user)=>{
       document.getElementById('notifToggle').setAttribute('aria-checked', data.notificationsEnabled !== false);
       db.collection('users').doc(user.uid).set({lastSeenAt: Date.now()}, {merge:true}).catch(console.error);
       updateAdminAccess(user.email);
+      classSectionOnSignIn(data);
       loadActiveDaysForUser(user.uid, data);
     }
   } else {
@@ -300,12 +365,13 @@ async function confirmDisplayName(){
     createdAt: firebase.firestore.FieldValue.serverTimestamp()
   }, {merge:true});
 
-  currentUser = {uid:user.uid, email:user.email, name:nameInput, section:''};
+  currentUser = {uid:user.uid, email:user.email, name:nameInput};
   activeDays = new Set([dayKey(new Date())]);
   renderStreakCalendar();
   applySignedInUI(nameInput, user.email, {}, 1);
   document.getElementById('notifToggle').setAttribute('aria-checked', 'true');
   updateAdminAccess(user.email);
+  classSectionOnSignIn({});
   document.getElementById('loginModalOverlay').classList.remove('show');
 }
 
@@ -324,7 +390,6 @@ function applySignedInUI(displayName, email, moduleProgress, streak){
   document.getElementById('editNameBtn').style.display = 'inline-block';
 
   document.getElementById('statStreak').textContent = streak;
-  renderSectionPicker();
 
   // apply this user's saved progress onto the shared module list, then re-render
   modules.forEach(m=>{
@@ -335,6 +400,7 @@ function applySignedInUI(displayName, email, moduleProgress, streak){
 
 function showSignedOutUI(){
   updateAdminAccess(null);
+  classSectionOnSignOut();
   document.getElementById('googleSignInBtn').style.display = 'flex';
   document.getElementById('userChip').style.display = 'none';
   document.getElementById('greetingHeading').textContent = 'Fall in love with solving problems';
@@ -346,7 +412,6 @@ function showSignedOutUI(){
   cancelEditingName();
   document.getElementById('statStreak').textContent = '0';
   document.getElementById('notifToggle').setAttribute('aria-checked', 'true');
-  renderSectionPicker();
 }
 
 /* ---------- Edit display name ---------- */
@@ -425,13 +490,11 @@ function selectTheme(index){
 function goToTheme(targetIndex){
   const nextTheme = themes[targetIndex];
 
-  // little bounce on the logo
-  const logoImg = document.getElementById('logoImg');
-  if(logoImg){
-    logoImg.classList.remove('logo-pop');
-    void logoImg.offsetWidth; // restart animation
-    logoImg.classList.add('logo-pop');
-  }
+  // flowing-wave flourish on the logo icon
+  const wave = document.getElementById('wavePath');
+  wave.classList.remove('wave-spin');
+  void wave.offsetWidth; // restart animation
+  wave.classList.add('wave-spin');
 
   // ripple that expands from the logo and reveals the new palette
   const btn = document.getElementById('logoBtn');
@@ -632,315 +695,519 @@ function showWizardStep(stepName){
 }
 
 // MINI GAME FORMAT (each topic has a `game:{ questions:[] }` slot):
-//   { q:'Question text', options:['A answer','B answer','C answer','D answer'], answer:0 /* index of the right option */,
-//     solution:['Step 1 ...','Step 2 ...','Step 3 ...'] }
-//   Students TYPE their answer (there are no answer choices). `answer` can simply be the text of the right answer, e.g. answer:'9'.
-//   (Older questions that use options + an index still work: the right option is used as the answer.)
-// Add `levels:true` and tag each question with level:'easy' | 'medium' | 'hard' to show the difficulty picker (Addition does this).
-// You can also add `cta:'your own call-to-action text'` inside `game:{}` to change the banner text.
-// With no questions, the game shows its empty design/structure.
+//   { level:'easy'|'medium'|'hard', q:'Question text', num:'1011', from:2, to:10, answer:'11', solution:['Step 1 ...','Step 2 ...','Step 3 ...'] }
+//   Students TYPE their answer. `num` is the number being converted (shown in the big conversion display),
+//   `from` / `to` are the bases (2, 8, 10 or 16). Binary, octal and hex answers ignore leading zeros and upper/lower case.
+//   Each question's `level` only changes the little difficulty tag. Add `levels:true` inside `game:{}` to show a difficulty picker instead.
+//   `lesson:{}` on a topic is the "Quick lesson" card shown above the game (idea, steps, worked example, cheat sheet).
+//   You can also add `cta:'your own call-to-action text'` inside `game:{}` to change the banner text.
 
-// What each level covers. Edit these lists to change the topics or what each quiz focuses on.
-// The AI writes the quiz questions from ONLY the "focus" lines of the topic that was picked.
-const LEVELS = {
+// The three groups of conversions shown on the topic picker.
+const BEGINNER_SRC = {
   beginner: {
     name: 'Beginner Level',
     short: 'Beginner',
     difficulty: 'easy',
     groups: [
-      { label: 'Basic operations', tone: 'a', topics: [
-        { key:'addition', title:'Addition', sub:'Combine numbers', icon:'+',
-          game:{ levels:true, questions:[
-            // ---------- EASY (20 questions) ----------
-            {"level": "easy", "q": "5 + 4 = ?", "answer": "9", "solution": ["Start at 5.", "Count up 4 more: 6, 7, 8, 9.", "So 5 + 4 = 9."]},
-            {"level": "easy", "q": "12 + 7 = ?", "answer": "19", "solution": ["Add the ones: 2 + 7 = 9.", "The tens stay the same: 1 ten.", "Put them together: 19."]},
-            {"level": "easy", "q": "23 + 14 = ?", "answer": "37", "solution": ["Add the ones: 3 + 4 = 7.", "Add the tens: 2 + 1 = 3 tens (30).", "Put them together: 37."]},
-            {"level": "easy", "q": "30 + 25 = ?", "answer": "55", "solution": ["Add the tens: 3 tens + 2 tens = 5 tens (50).", "Add the ones: 0 + 5 = 5.", "Put them together: 55."]},
-            {"level": "easy", "q": "Ana has 8 apples. She picks 6 more. How many apples does she have now?", "answer": "14", "solution": ["\"Picks more\" means we add: 8 + 6.", "8 + 2 = 10, then 4 more makes 14.", "Ana has 14 apples."]},
-            {"level": "easy", "q": "5 + 3 = ?", "answer": "8", "solution": ["Start at 5.", "Count up 3 more: 6, 7, 8.", "So 5 + 3 = 8."]},
-            {"level": "easy", "q": "5 + 7 = ?", "answer": "12", "solution": ["Make 10 first: 5 + 5 = 10.", "7 is 5 + 2, so there is 2 left to add.", "10 + 2 = 12."]},
-            {"level": "easy", "q": "2 + 8 = ?", "answer": "10", "solution": ["Start at 2.", "Count up 8 more: 3, 4, 5, 6, 7, 8, 9, 10.", "So 2 + 8 = 10."]},
-            {"level": "easy", "q": "2 + 2 = ?", "answer": "4", "solution": ["Start at 2.", "Count up 2 more: 3, 4.", "So 2 + 2 = 4."]},
-            {"level": "easy", "q": "61 + 1 = ?", "answer": "62", "solution": ["Add the ones: 1 + 1 = 2.", "The tens stay the same: 60.", "Put them together: 62."]},
-            {"level": "easy", "q": "21 + 4 = ?", "answer": "25", "solution": ["Add the ones: 1 + 4 = 5.", "The tens stay the same: 20.", "Put them together: 25."]},
-            {"level": "easy", "q": "23 + 1 = ?", "answer": "24", "solution": ["Add the ones: 3 + 1 = 4.", "The tens stay the same: 20.", "Put them together: 24."]},
-            {"level": "easy", "q": "33 + 26 = ?", "answer": "59", "solution": ["Add the ones: 3 + 6 = 9.", "Add the tens: 30 + 20 = 50.", "Put them together: 59."]},
-            {"level": "easy", "q": "38 + 40 = ?", "answer": "78", "solution": ["Add the ones: 8 + 0 = 8.", "Add the tens: 30 + 40 = 70.", "Put them together: 78."]},
-            {"level": "easy", "q": "40 + 40 = ?", "answer": "80", "solution": ["Add the ones: 0 + 0 = 0.", "Add the tens: 40 + 40 = 80.", "Put them together: 80."]},
-            {"level": "easy", "q": "11 + 44 = ?", "answer": "55", "solution": ["Add the ones: 1 + 4 = 5.", "Add the tens: 10 + 40 = 50.", "Put them together: 55."]},
-            {"level": "easy", "q": "20 + 20 = ?", "answer": "40", "solution": ["Think in tens: 2 tens + 2 tens = 4 tens.", "4 tens = 40.", "So 20 + 20 = 40."]},
-            {"level": "easy", "q": "60 + 30 = ?", "answer": "90", "solution": ["Think in tens: 6 tens + 3 tens = 9 tens.", "9 tens = 90.", "So 60 + 30 = 90."]},
-            {"level": "easy", "q": "Jade has 24 stickers. A friend gives Jade 20 more. How many stickers does Jade have now?", "answer": "44", "solution": ["\"More\" means we add: 24 + 20.", "Ones: 4 + 0 = 4. Tens: 20 + 20 = 40.", "Answer: 44 stickers."]},
-            {"level": "easy", "q": "Ivan has 24 candies. A friend gives Ivan 3 more. How many candies does Ivan have now?", "answer": "27", "solution": ["\"More\" means we add: 24 + 3.", "Ones: 4 + 3 = 7. Tens: 20 + 0 = 20.", "Answer: 27 candies."]},
-            // ---------- MEDIUM (20 questions) ----------
-            {"level": "medium", "q": "47 + 38 = ?", "answer": "85", "solution": ["Ones: 7 + 8 = 15. Write 5 and carry 1.", "Tens: 4 + 3 + 1 (carried) = 8.", "Answer: 85."]},
-            {"level": "medium", "q": "156 + 79 = ?", "answer": "235", "solution": ["Ones: 6 + 9 = 15. Write 5, carry 1.", "Tens: 5 + 7 + 1 = 13. Write 3, carry 1.", "Hundreds: 1 + 0 + 1 = 2. Answer: 235."]},
-            {"level": "medium", "q": "248 + 365 = ?", "answer": "613", "solution": ["Ones: 8 + 5 = 13. Write 3, carry 1.", "Tens: 4 + 6 + 1 = 11. Write 1, carry 1.", "Hundreds: 2 + 3 + 1 = 6. Answer: 613."]},
-            {"level": "medium", "q": "509 + 294 = ?", "answer": "803", "solution": ["Ones: 9 + 4 = 13. Write 3, carry 1.", "Tens: 0 + 9 + 1 = 10. Write 0, carry 1.", "Hundreds: 5 + 2 + 1 = 8. Answer: 803."]},
-            {"level": "medium", "q": "A store sold 125 notebooks on Monday and 187 on Tuesday. How many notebooks did it sell in all?", "answer": "312", "solution": ["\"In all\" means add: 125 + 187.", "Ones: 5 + 7 = 12 (write 2, carry 1). Tens: 2 + 8 + 1 = 11 (write 1, carry 1).", "Hundreds: 1 + 1 + 1 = 3. Answer: 312 notebooks."]},
-            {"level": "medium", "q": "36 + 75 = ?", "answer": "111", "solution": ["Ones: 6 + 5 = 11. Write 1, carry 1.", "Tens: 3 + 7 + 1 (carried) = 11.", "Answer: 111."]},
-            {"level": "medium", "q": "28 + 38 = ?", "answer": "66", "solution": ["Ones: 8 + 8 = 16. Write 6, carry 1.", "Tens: 2 + 3 + 1 (carried) = 6.", "Answer: 66."]},
-            {"level": "medium", "q": "55 + 28 = ?", "answer": "83", "solution": ["Ones: 5 + 8 = 13. Write 3, carry 1.", "Tens: 5 + 2 + 1 (carried) = 8.", "Answer: 83."]},
-            {"level": "medium", "q": "34 + 39 = ?", "answer": "73", "solution": ["Ones: 4 + 9 = 13. Write 3, carry 1.", "Tens: 3 + 3 + 1 (carried) = 7.", "Answer: 73."]},
-            {"level": "medium", "q": "484 + 38 = ?", "answer": "522", "solution": ["Ones: 4 + 8 = 12. Write 2, carry 1.", "Tens: 8 + 3 + 1 (carried) = 12. Write 2, carry 1.", "Hundreds: 4 + 0 + 1 (carried) = 5.", "Answer: 522."]},
-            {"level": "medium", "q": "253 + 48 = ?", "answer": "301", "solution": ["Ones: 3 + 8 = 11. Write 1, carry 1.", "Tens: 5 + 4 + 1 (carried) = 10. Write 0, carry 1.", "Hundreds: 2 + 0 + 1 (carried) = 3.", "Answer: 301."]},
-            {"level": "medium", "q": "253 + 38 = ?", "answer": "291", "solution": ["Ones: 3 + 8 = 11. Write 1, carry 1.", "Tens: 5 + 3 + 1 (carried) = 9.", "Hundreds: 2 + 0 = 2.", "Answer: 291."]},
-            {"level": "medium", "q": "279 + 223 = ?", "answer": "502", "solution": ["Ones: 9 + 3 = 12. Write 2, carry 1.", "Tens: 7 + 2 + 1 (carried) = 10. Write 0, carry 1.", "Hundreds: 2 + 2 + 1 (carried) = 5.", "Answer: 502."]},
-            {"level": "medium", "q": "768 + 283 = ?", "answer": "1,051", "solution": ["Ones: 8 + 3 = 11. Write 1, carry 1.", "Tens: 6 + 8 + 1 (carried) = 15. Write 5, carry 1.", "Hundreds: 7 + 2 + 1 (carried) = 10.", "Answer: 1,051."]},
-            {"level": "medium", "q": "341 + 499 = ?", "answer": "840", "solution": ["Ones: 1 + 9 = 10. Write 0, carry 1.", "Tens: 4 + 9 + 1 (carried) = 14. Write 4, carry 1.", "Hundreds: 3 + 4 + 1 (carried) = 8.", "Answer: 840."]},
-            {"level": "medium", "q": "674 + 776 = ?", "answer": "1,450", "solution": ["Ones: 4 + 6 = 10. Write 0, carry 1.", "Tens: 7 + 7 + 1 (carried) = 15. Write 5, carry 1.", "Hundreds: 6 + 7 + 1 (carried) = 14.", "Answer: 1,450."]},
-            {"level": "medium", "q": "509 + 583 = ?", "answer": "1,092", "solution": ["Ones: 9 + 3 = 12. Write 2, carry 1.", "Tens: 0 + 8 + 1 (carried) = 9.", "Hundreds: 5 + 5 = 10.", "Answer: 1,092."]},
-            {"level": "medium", "q": "A bakery made 205 pandesal in the morning and 175 in the afternoon. How many pandesal did it make in all?", "answer": "380", "solution": ["\"In all\" means add: 205 + 175.", "Ones: 5 + 5 = 10. Write 0, carry 1.", "Tens: 0 + 7 + 1 (carried) = 8.", "Hundreds: 2 + 1 = 3.", "Answer: 380 pandesal."]},
-            {"level": "medium", "q": "A bakery made 309 pandesal in the morning and 161 in the afternoon. How many pandesal did it make in all?", "answer": "470", "solution": ["\"In all\" means add: 309 + 161.", "Ones: 9 + 1 = 10. Write 0, carry 1.", "Tens: 0 + 6 + 1 (carried) = 7.", "Hundreds: 3 + 1 = 4.", "Answer: 470 pandesal."]},
-            {"level": "medium", "q": "A bus carried 338 passengers before noon and 477 after noon. How many passengers did it carry in all?", "answer": "815", "solution": ["\"In all\" means add: 338 + 477.", "Ones: 8 + 7 = 15. Write 5, carry 1.", "Tens: 3 + 7 + 1 (carried) = 11. Write 1, carry 1.", "Hundreds: 3 + 4 + 1 (carried) = 8.", "Answer: 815 passengers."]},
-            // ---------- HARD (20 questions) ----------
-            {"level": "hard", "q": "2,478 + 3,659 = ?", "answer": "6,137", "solution": ["Ones: 8 + 9 = 17. Write 7, carry 1.", "Tens: 7 + 5 + 1 = 13. Write 3, carry 1.", "Hundreds: 4 + 6 + 1 = 11. Write 1, carry 1. Thousands: 2 + 3 + 1 = 6.", "Answer: 6,137."]},
-            {"level": "hard", "q": "−8 + 15 = ?", "answer": "7", "solution": ["Start at −8 on the number line.", "Move 15 steps to the right. 8 steps reach 0.", "7 steps are left, so you land on 7."]},
-            {"level": "hard", "q": "−14 + (−9) = ?", "answer": "−23", "solution": ["Both numbers are negative, so add their sizes: 14 + 9 = 23.", "Keep the negative sign.", "Answer: −23."]},
-            {"level": "hard", "q": "1,250 + 875 + 2,340 = ?", "answer": "4,465", "solution": ["Add the first two: 1,250 + 875 = 2,125.", "Now add the third: 2,125 + 2,340 = 4,465.", "Answer: 4,465."]},
-            {"level": "hard", "q": "A school collected 3,486 bottles in January and 2,759 bottles in February. How many bottles did it collect in all?", "answer": "6,245", "solution": ["\"In all\" means add: 3,486 + 2,759.", "Ones: 6 + 9 = 15 (5, carry 1). Tens: 8 + 5 + 1 = 14 (4, carry 1).", "Hundreds: 4 + 7 + 1 = 12 (2, carry 1). Thousands: 3 + 2 + 1 = 6.", "Answer: 6,245 bottles."]},
-            {"level": "hard", "q": "1,932 + 3,978 = ?", "answer": "5,910", "solution": ["Ones: 2 + 8 = 10. Write 0, carry 1.", "Tens: 3 + 7 + 1 (carried) = 11. Write 1, carry 1.", "Hundreds: 9 + 9 + 1 (carried) = 19. Write 9, carry 1.", "Thousands: 1 + 3 + 1 (carried) = 5.", "Answer: 5,910."]},
-            {"level": "hard", "q": "3,448 + 2,367 = ?", "answer": "5,815", "solution": ["Ones: 8 + 7 = 15. Write 5, carry 1.", "Tens: 4 + 6 + 1 (carried) = 11. Write 1, carry 1.", "Hundreds: 4 + 3 + 1 (carried) = 8.", "Thousands: 3 + 2 = 5.", "Answer: 5,815."]},
-            {"level": "hard", "q": "6,689 + 3,398 = ?", "answer": "10,087", "solution": ["Ones: 9 + 8 = 17. Write 7, carry 1.", "Tens: 8 + 9 + 1 (carried) = 18. Write 8, carry 1.", "Hundreds: 6 + 3 + 1 (carried) = 10. Write 0, carry 1.", "Thousands: 6 + 3 + 1 (carried) = 10.", "Answer: 10,087."]},
-            {"level": "hard", "q": "5,759 + 5,591 = ?", "answer": "11,350", "solution": ["Ones: 9 + 1 = 10. Write 0, carry 1.", "Tens: 5 + 9 + 1 (carried) = 15. Write 5, carry 1.", "Hundreds: 7 + 5 + 1 (carried) = 13. Write 3, carry 1.", "Thousands: 5 + 5 + 1 (carried) = 11.", "Answer: 11,350."]},
-            {"level": "hard", "q": "−10 + 11 = ?", "answer": "1", "solution": ["Start at −10 on the number line.", "Move 11 steps to the right. 10 steps reach 0.", "1 more steps take you to 1."]},
-            {"level": "hard", "q": "−9 + 10 = ?", "answer": "1", "solution": ["Start at −9 on the number line.", "Move 10 steps to the right. 9 steps reach 0.", "1 more steps take you to 1."]},
-            {"level": "hard", "q": "−19 + 26 = ?", "answer": "7", "solution": ["Start at −19 on the number line.", "Move 26 steps to the right. 19 steps reach 0.", "7 more steps take you to 7."]},
-            {"level": "hard", "q": "−20 + (−21) = ?", "answer": "−41", "solution": ["Both numbers are negative, so add their sizes: 20 + 21 = 41.", "Keep the negative sign.", "Answer: −41."]},
-            {"level": "hard", "q": "−16 + (−14) = ?", "answer": "−30", "solution": ["Both numbers are negative, so add their sizes: 16 + 14 = 30.", "Keep the negative sign.", "Answer: −30."]},
-            {"level": "hard", "q": "300 + 900 + 700 = ?", "answer": "1,900", "solution": ["Add the first two: 300 + 900 = 1,200.", "Now add the third: 1,200 + 700 = 1,900.", "Answer: 1,900."]},
-            {"level": "hard", "q": "700 + 300 + 640 = ?", "answer": "1,640", "solution": ["Add the first two: 700 + 300 = 1,000.", "Now add the third: 1,000 + 640 = 1,640.", "Answer: 1,640."]},
-            {"level": "hard", "q": "2.69 + 3.98 = ?", "answer": "6.67", "solution": ["Line up the decimal points so the digits match.", "Add as whole numbers: 269 + 398 = 667.", "Put the decimal point back, 2 places from the right: 6.67."]},
-            {"level": "hard", "q": "8.42 + 6.98 = ?", "answer": "15.40", "solution": ["Line up the decimal points so the digits match.", "Add as whole numbers: 842 + 698 = 1540.", "Put the decimal point back, 2 places from the right: 15.40."]},
-            {"level": "hard", "q": "A school collected 3,407 bottles in January and 2,183 bottles in February. How many bottles did it collect in all?", "answer": "5,590", "solution": ["\"In all\" means add: 3,407 + 2,183.", "Ones: 7 + 3 = 10. Write 0, carry 1.", "Tens: 0 + 8 + 1 (carried) = 9.", "Hundreds: 4 + 1 = 5.", "Thousands: 3 + 2 = 5.", "Answer: 5,590 bottles."]},
-            {"level": "hard", "q": "A farm harvested 6,489 kg of rice in the first season and 2,826 kg in the second season. How many kilograms is that in all?", "answer": "9,315", "solution": ["\"In all\" means add: 6,489 + 2,826.", "Ones: 9 + 6 = 15. Write 5, carry 1.", "Tens: 8 + 2 + 1 (carried) = 11. Write 1, carry 1.", "Hundreds: 4 + 8 + 1 (carried) = 13. Write 3, carry 1.", "Thousands: 6 + 2 + 1 (carried) = 9.", "Answer: 9,315 kg."]},
+      { label: "Binary and decimal", tone: 'a', topics: [
+        { key:"bin-dec", title:"Binary to Decimal", sub:"Add up the place values", icon:"2→10", small:true,
+          game:{ cta:"Think you can master Binary to Decimal? Answer all 20 questions, beat your best score, and tap Show solution whenever you're stuck!", questions:[
+            // ---------- EASY (7 questions) ----------
+            {"level": "easy", "q": "Convert this binary number to decimal.", "num": "101", "from": 2, "to": 10, "base": 10, "answer": "5", "solution": ["Write the place values above the bits, from left to right: 4, 2, 1.", "Keep only the place values that sit above a 1: 4, 1.", "Add them up: 4 + 1 = 5."]},
+            {"level": "easy", "q": "Convert this binary number to decimal.", "num": "110", "from": 2, "to": 10, "base": 10, "answer": "6", "solution": ["Write the place values above the bits, from left to right: 4, 2, 1.", "Keep only the place values that sit above a 1: 4, 2.", "Add them up: 4 + 2 = 6."]},
+            {"level": "easy", "q": "Convert this binary number to decimal.", "num": "111", "from": 2, "to": 10, "base": 10, "answer": "7", "solution": ["Write the place values above the bits, from left to right: 4, 2, 1.", "Keep only the place values that sit above a 1: 4, 2, 1.", "Add them up: 4 + 2 + 1 = 7."]},
+            {"level": "easy", "q": "Convert this binary number to decimal.", "num": "1001", "from": 2, "to": 10, "base": 10, "answer": "9", "solution": ["Write the place values above the bits, from left to right: 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 8, 1.", "Add them up: 8 + 1 = 9."]},
+            {"level": "easy", "q": "Convert this binary number to decimal.", "num": "1010", "from": 2, "to": 10, "base": 10, "answer": "10", "solution": ["Write the place values above the bits, from left to right: 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 8, 2.", "Add them up: 8 + 2 = 10."]},
+            {"level": "easy", "q": "Convert this binary number to decimal.", "num": "1100", "from": 2, "to": 10, "base": 10, "answer": "12", "solution": ["Write the place values above the bits, from left to right: 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 8, 4.", "Add them up: 8 + 4 = 12."]},
+            {"level": "easy", "q": "Convert this binary number to decimal.", "num": "1111", "from": 2, "to": 10, "base": 10, "answer": "15", "solution": ["Write the place values above the bits, from left to right: 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 8, 4, 2, 1.", "Add them up: 8 + 4 + 2 + 1 = 15."]},
+            // ---------- MEDIUM (7 questions) ----------
+            {"level": "medium", "q": "What is this binary number in decimal?", "num": "10010", "from": 2, "to": 10, "base": 10, "answer": "18", "solution": ["Write the place values above the bits, from left to right: 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 16, 2.", "Add them up: 16 + 2 = 18."]},
+            {"level": "medium", "q": "What is this binary number in decimal?", "num": "10101", "from": 2, "to": 10, "base": 10, "answer": "21", "solution": ["Write the place values above the bits, from left to right: 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 16, 4, 1.", "Add them up: 16 + 4 + 1 = 21."]},
+            {"level": "medium", "q": "What is this binary number in decimal?", "num": "11001", "from": 2, "to": 10, "base": 10, "answer": "25", "solution": ["Write the place values above the bits, from left to right: 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 16, 8, 1.", "Add them up: 16 + 8 + 1 = 25."]},
+            {"level": "medium", "q": "What is this binary number in decimal?", "num": "11111", "from": 2, "to": 10, "base": 10, "answer": "31", "solution": ["Write the place values above the bits, from left to right: 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 16, 8, 4, 2, 1.", "Add them up: 16 + 8 + 4 + 2 + 1 = 31."]},
+            {"level": "medium", "q": "What is this binary number in decimal?", "num": "100000", "from": 2, "to": 10, "base": 10, "answer": "32", "solution": ["Write the place values above the bits, from left to right: 32, 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 32.", "There is just one 1, so the answer is 32."]},
+            {"level": "medium", "q": "What is this binary number in decimal?", "num": "101101", "from": 2, "to": 10, "base": 10, "answer": "45", "solution": ["Write the place values above the bits, from left to right: 32, 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 32, 8, 4, 1.", "Add them up: 32 + 8 + 4 + 1 = 45."]},
+            {"level": "medium", "q": "What is this binary number in decimal?", "num": "110011", "from": 2, "to": 10, "base": 10, "answer": "51", "solution": ["Write the place values above the bits, from left to right: 32, 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 32, 16, 2, 1.", "Add them up: 32 + 16 + 2 + 1 = 51."]},
+            // ---------- HARD (6 questions) ----------
+            {"level": "hard", "q": "A computer stores the letter A as this byte. What decimal code is that?", "num": "01000001", "from": 2, "to": 10, "base": 10, "answer": "65", "solution": ["Write the place values above the bits, from left to right: 128, 64, 32, 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 64, 1.", "Add them up: 64 + 1 = 65."]},
+            {"level": "hard", "q": "Convert this byte to decimal.", "num": "10101010", "from": 2, "to": 10, "base": 10, "answer": "170", "solution": ["Write the place values above the bits, from left to right: 128, 64, 32, 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 128, 32, 8, 2.", "Add them up: 128 + 32 + 8 + 2 = 170."]},
+            {"level": "hard", "q": "Convert this byte to decimal.", "num": "11001000", "from": 2, "to": 10, "base": 10, "answer": "200", "solution": ["Write the place values above the bits, from left to right: 128, 64, 32, 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 128, 64, 8.", "Add them up: 128 + 64 + 8 = 200."]},
+            {"level": "hard", "q": "Only the leftmost bit of this byte is on. What is its decimal value?", "num": "10000000", "from": 2, "to": 10, "base": 10, "answer": "128", "solution": ["Write the place values above the bits, from left to right: 128, 64, 32, 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 128.", "There is just one 1, so the answer is 128."]},
+            {"level": "hard", "q": "Convert this byte to decimal.", "num": "11011011", "from": 2, "to": 10, "base": 10, "answer": "219", "solution": ["Write the place values above the bits, from left to right: 128, 64, 32, 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 128, 64, 16, 8, 2, 1.", "Add them up: 128 + 64 + 16 + 8 + 2 + 1 = 219."]},
+            {"level": "hard", "q": "This is the biggest value one byte can hold. What is it in decimal?", "num": "11111111", "from": 2, "to": 10, "base": 10, "answer": "255", "solution": ["Write the place values above the bits, from left to right: 128, 64, 32, 16, 8, 4, 2, 1.", "Keep only the place values that sit above a 1: 128, 64, 32, 16, 8, 4, 2, 1.", "Add them up: 128 + 64 + 32 + 16 + 8 + 4 + 2 + 1 = 255."]},
           ] },
-          // Lesson materials shown when the Addition card is clicked. Add `resources` to any other topic to give it the same page.
-          resources:[
-            { type:'video', staticId:'video-addition' }, // video is written in plain HTML in gen-portal.html
-          ],
-          focus:[
-          'adding two- and three-digit whole numbers', 'adding with carrying (regrouping)',
-          'adding decimals', 'finding a missing number in an addition problem', 'simple addition word problems'] },
-        { key:'subtraction', title:'Subtraction', sub:'Take numbers away', icon:'\u2212',
-          game:{ levels:true, questions:[
-            // ---------- EASY (20 questions) ----------
-            {"level": "easy", "q": "9 − 4 = ?", "answer": "5", "solution": ["Start at 9.", "Count back 4: 8, 7, 6, 5.", "So 9 − 4 = 5."]},
-            {"level": "easy", "q": "15 − 6 = ?", "answer": "9", "solution": ["Take away 5 first: 15 − 5 = 10.", "Take away 1 more: 10 − 1 = 9.", "So 15 − 6 = 9."]},
-            {"level": "easy", "q": "48 − 23 = ?", "answer": "25", "solution": ["Subtract the ones: 8 − 3 = 5.", "Subtract the tens: 4 − 2 = 2 tens (20).", "Put them together: 25."]},
-            {"level": "easy", "q": "70 − 30 = ?", "answer": "40", "solution": ["7 tens − 3 tens = 4 tens.", "4 tens = 40.", "So 70 − 30 = 40."]},
-            {"level": "easy", "q": "Mia has 12 stickers. She gives 5 away. How many stickers does she have left?", "answer": "7", "solution": ["\"Gives away\" means we subtract: 12 − 5.", "12 − 2 = 10, then 3 more makes 7.", "Mia has 7 stickers left."]},
-            {"level": "easy", "q": "6 − 1 = ?", "answer": "5", "solution": ["Start at 6.", "Count back 1: 5.", "So 6 − 1 = 5."]},
-            {"level": "easy", "q": "5 − 3 = ?", "answer": "2", "solution": ["Start at 5.", "Count back 3: 4, 3, 2.", "So 5 − 3 = 2."]},
-            {"level": "easy", "q": "6 − 5 = ?", "answer": "1", "solution": ["Start at 6.", "Count back 5: 5, 4, 3, 2, 1.", "So 6 − 5 = 1."]},
-            {"level": "easy", "q": "8 − 6 = ?", "answer": "2", "solution": ["Start at 8.", "Count back 6: 7, 6, 5, 4, 3, 2.", "So 8 − 6 = 2."]},
-            {"level": "easy", "q": "14 − 7 = ?", "answer": "7", "solution": ["Take away 4 first to get to 10: 14 − 4 = 10.", "7 − 4 = 3 still to take away.", "10 − 3 = 7."]},
-            {"level": "easy", "q": "13 − 9 = ?", "answer": "4", "solution": ["Take away 3 first to get to 10: 13 − 3 = 10.", "9 − 3 = 6 still to take away.", "10 − 6 = 4."]},
-            {"level": "easy", "q": "11 − 7 = ?", "answer": "4", "solution": ["Take away 1 first to get to 10: 11 − 1 = 10.", "7 − 1 = 6 still to take away.", "10 − 6 = 4."]},
-            {"level": "easy", "q": "65 − 15 = ?", "answer": "50", "solution": ["Subtract the ones: 5 − 5 = 0.", "Subtract the tens: 60 − 10 = 50.", "Put them together: 50."]},
-            {"level": "easy", "q": "75 − 35 = ?", "answer": "40", "solution": ["Subtract the ones: 5 − 5 = 0.", "Subtract the tens: 70 − 30 = 40.", "Put them together: 40."]},
-            {"level": "easy", "q": "52 − 22 = ?", "answer": "30", "solution": ["Subtract the ones: 2 − 2 = 0.", "Subtract the tens: 50 − 20 = 30.", "Put them together: 30."]},
-            {"level": "easy", "q": "48 − 15 = ?", "answer": "33", "solution": ["Subtract the ones: 8 − 5 = 3.", "Subtract the tens: 40 − 10 = 30.", "Put them together: 33."]},
-            {"level": "easy", "q": "90 − 80 = ?", "answer": "10", "solution": ["Think in tens: 9 tens − 8 tens = 1 tens.", "1 tens = 10.", "So 90 − 80 = 10."]},
-            {"level": "easy", "q": "100 − 50 = ?", "answer": "50", "solution": ["Think in tens: 10 tens − 5 tens = 5 tens.", "5 tens = 50.", "So 100 − 50 = 50."]},
-            {"level": "easy", "q": "Eli has 38 cookies and gives 11 away. How many cookies does Eli have left?", "answer": "27", "solution": ["\"Gives away\" means we subtract: 38 − 11.", "Ones: 8 − 1 = 7. Tens: 30 − 10 = 20.", "Answer: 27 cookies left."]},
-            {"level": "easy", "q": "Hana has 38 candies and gives 16 away. How many candies does Hana have left?", "answer": "22", "solution": ["\"Gives away\" means we subtract: 38 − 16.", "Ones: 8 − 6 = 2. Tens: 30 − 10 = 20.", "Answer: 22 candies left."]},
-            // ---------- MEDIUM (20 questions) ----------
-            {"level": "medium", "q": "52 − 27 = ?", "answer": "25", "solution": ["Ones: 2 is smaller than 7, so borrow 1 ten. 12 − 7 = 5.", "Tens: 5 became 4, so 4 − 2 = 2.", "Answer: 25."]},
-            {"level": "medium", "q": "304 − 158 = ?", "answer": "146", "solution": ["Ones: 4 is smaller than 8, so we must borrow. The tens digit is 0, so borrow from the hundreds first: 3 hundreds become 2 hundreds and 10 tens, then 1 ten goes to the ones.", "Ones: 14 − 8 = 6. Tens: 9 − 5 = 4. Hundreds: 2 − 1 = 1.", "Answer: 146."]},
-            {"level": "medium", "q": "600 − 245 = ?", "answer": "355", "solution": ["Think of 600 as 5 hundreds, 9 tens and 10 ones.", "Ones: 10 − 5 = 5. Tens: 9 − 4 = 5. Hundreds: 5 − 2 = 3.", "Answer: 355."]},
-            {"level": "medium", "q": "823 − 467 = ?", "answer": "356", "solution": ["Ones: 3 is smaller than 7, borrow 1 ten: 13 − 7 = 6.", "Tens: 2 became 1, and 1 is smaller than 6, so borrow 1 hundred: 11 − 6 = 5.", "Hundreds: 8 became 7, so 7 − 4 = 3. Answer: 356."]},
-            {"level": "medium", "q": "A farm had 450 eggs and sold 168 of them. How many eggs are left?", "answer": "282", "solution": ["\"Sold\" means we subtract: 450 − 168.", "Ones: borrow, 10 − 8 = 2. Tens: 4 is smaller than 6, borrow, 14 − 6 = 8. Hundreds: 3 − 1 = 2.", "Answer: 282 eggs."]},
-            {"level": "medium", "q": "93 − 35 = ?", "answer": "58", "solution": ["Ones: 3 is smaller than 5, so borrow 1 from the next place. 13 − 5 = 8.", "Tens: 9 lent 1, so 8 − 3 = 5.", "Answer: 58."]},
-            {"level": "medium", "q": "92 − 16 = ?", "answer": "76", "solution": ["Ones: 2 is smaller than 6, so borrow 1 from the next place. 12 − 6 = 6.", "Tens: 9 lent 1, so 8 − 1 = 7.", "Answer: 76."]},
-            {"level": "medium", "q": "90 − 19 = ?", "answer": "71", "solution": ["Ones: 0 is smaller than 9, so borrow 1 from the next place. 10 − 9 = 1.", "Tens: 9 lent 1, so 8 − 1 = 7.", "Answer: 71."]},
-            {"level": "medium", "q": "42 − 34 = ?", "answer": "8", "solution": ["Ones: 2 is smaller than 4, so borrow 1 from the next place. 12 − 4 = 8.", "Tens: 4 lent 1, so 3 − 3 = 0.", "Answer: 8."]},
-            {"level": "medium", "q": "824 − 127 = ?", "answer": "697", "solution": ["Ones: 4 is smaller than 7, so borrow 1 from the next place. 14 − 7 = 7.", "Tens: 1 is smaller than 2, so borrow 1 from the next place. 11 − 2 = 9.", "Hundreds: 8 lent 1, so 7 − 1 = 6.", "Answer: 697."]},
-            {"level": "medium", "q": "602 − 266 = ?", "answer": "336", "solution": ["Ones: 2 is smaller than 6, so borrow 1 from the next place. 12 − 6 = 6.", "Tens: this place gave 1 to the right, so we borrow again. 9 − 6 = 3.", "Hundreds: 6 lent 1, so 5 − 2 = 3.", "Answer: 336."]},
-            {"level": "medium", "q": "611 − 233 = ?", "answer": "378", "solution": ["Ones: 1 is smaller than 3, so borrow 1 from the next place. 11 − 3 = 8.", "Tens: 0 is smaller than 3, so borrow 1 from the next place. 10 − 3 = 7.", "Hundreds: 6 lent 1, so 5 − 2 = 3.", "Answer: 378."]},
-            {"level": "medium", "q": "742 − 173 = ?", "answer": "569", "solution": ["Ones: 2 is smaller than 3, so borrow 1 from the next place. 12 − 3 = 9.", "Tens: 3 is smaller than 7, so borrow 1 from the next place. 13 − 7 = 6.", "Hundreds: 7 lent 1, so 6 − 1 = 5.", "Answer: 569."]},
-            {"level": "medium", "q": "800 − 161 = ?", "answer": "639", "solution": ["Ones: 0 is smaller than 1, so borrow 1 from the next place. 10 − 1 = 9.", "Tens: this place gave 1 to the right, so we borrow again. 9 − 6 = 3.", "Hundreds: 8 lent 1, so 7 − 1 = 6.", "Answer: 639."]},
-            {"level": "medium", "q": "600 − 178 = ?", "answer": "422", "solution": ["Ones: 0 is smaller than 8, so borrow 1 from the next place. 10 − 8 = 2.", "Tens: this place gave 1 to the right, so we borrow again. 9 − 7 = 2.", "Hundreds: 6 lent 1, so 5 − 1 = 4.", "Answer: 422."]},
-            {"level": "medium", "q": "800 − 302 = ?", "answer": "498", "solution": ["Ones: 0 is smaller than 2, so borrow 1 from the next place. 10 − 2 = 8.", "Tens: this place gave 1 to the right, so we borrow again. 9 − 0 = 9.", "Hundreds: 8 lent 1, so 7 − 3 = 4.", "Answer: 498."]},
-            {"level": "medium", "q": "A school had 871 chairs and moved 156 to another room. How many chairs are left?", "answer": "715", "solution": ["\"Left\" tells us to subtract: 871 − 156.", "Ones: 1 is smaller than 6, so borrow 1 from the next place. 11 − 6 = 5.", "Tens: 7 lent 1, so 6 − 5 = 1.", "Hundreds: 8 − 1 = 7.", "Answer: 715 chairs."]},
-            {"level": "medium", "q": "A truck carried 896 boxes and unloaded 479 of them. How many boxes are still on the truck?", "answer": "417", "solution": ["\"Left\" tells us to subtract: 896 − 479.", "Ones: 6 is smaller than 9, so borrow 1 from the next place. 16 − 9 = 7.", "Tens: 9 lent 1, so 8 − 7 = 1.", "Hundreds: 8 − 4 = 4.", "Answer: 417 boxes."]},
-            {"level": "medium", "q": "A shop had 342 shirts and sold 283 of them. How many shirts are left?", "answer": "59", "solution": ["\"Left\" tells us to subtract: 342 − 283.", "Ones: 2 is smaller than 3, so borrow 1 from the next place. 12 − 3 = 9.", "Tens: 3 is smaller than 8, so borrow 1 from the next place. 13 − 8 = 5.", "Hundreds: 3 lent 1, so 2 − 2 = 0.", "Answer: 59 shirts."]},
-            {"level": "medium", "q": "A farm had 351 eggs and sold 162 of them. How many eggs are left?", "answer": "189", "solution": ["\"Left\" tells us to subtract: 351 − 162.", "Ones: 1 is smaller than 2, so borrow 1 from the next place. 11 − 2 = 9.", "Tens: 4 is smaller than 6, so borrow 1 from the next place. 14 − 6 = 8.", "Hundreds: 3 lent 1, so 2 − 1 = 1.", "Answer: 189 eggs."]},
-            // ---------- HARD (20 questions) ----------
-            {"level": "hard", "q": "5,002 − 2,874 = ?", "answer": "2,128", "solution": ["Borrow across the zeros: 5,002 becomes 4 thousands, 9 hundreds, 9 tens and 12 ones.", "Ones: 12 − 4 = 8. Tens: 9 − 7 = 2. Hundreds: 9 − 8 = 1.", "Thousands: 4 − 2 = 2. Answer: 2,128."]},
-            {"level": "hard", "q": "8 − 15 = ?", "answer": "−7", "solution": ["Start at 8 on the number line.", "Move 15 steps to the left. 8 steps reach 0.", "7 more steps take you to −7."]},
-            {"level": "hard", "q": "−6 − 9 = ?", "answer": "−15", "solution": ["Subtracting 9 means moving 9 steps to the left of −6.", "You keep going in the negative direction, so add the sizes: 6 + 9 = 15.", "Answer: −15."]},
-            {"level": "hard", "q": "10,000 − 3,456 = ?", "answer": "6,544", "solution": ["Use 9,999 − 3,456 first, then add 1.", "9,999 − 3,456: 9−3 = 6, 9−4 = 5, 9−5 = 4, 9−6 = 3, which gives 6,543.", "6,543 + 1 = 6,544. Answer: 6,544."]},
-            {"level": "hard", "q": "A library had 12,500 books. It lent out 4,875 books, and then 2,300 more. How many books are left?", "answer": "5,325", "solution": ["Subtract the first loan: 12,500 − 4,875 = 7,625.", "Subtract the second loan: 7,625 − 2,300 = 5,325.", "Answer: 5,325 books."]},
-            {"level": "hard", "q": "4,000 − 2,069 = ?", "answer": "1,931", "solution": ["Ones: 0 is smaller than 9, so borrow 1 from the next place. 10 − 9 = 1.", "Tens: this place gave 1 to the right, so we borrow again. 9 − 6 = 3.", "Hundreds: this place gave 1 to the right, so we borrow again. 9 − 0 = 9.", "Thousands: 4 lent 1, so 3 − 2 = 1.", "Answer: 1,931."]},
-            {"level": "hard", "q": "6,004 − 3,495 = ?", "answer": "2,509", "solution": ["Ones: 4 is smaller than 5, so borrow 1 from the next place. 14 − 5 = 9.", "Tens: this place gave 1 to the right, so we borrow again. 9 − 9 = 0.", "Hundreds: this place gave 1 to the right, so we borrow again. 9 − 4 = 5.", "Thousands: 6 lent 1, so 5 − 3 = 2.", "Answer: 2,509."]},
-            {"level": "hard", "q": "7,003 − 1,865 = ?", "answer": "5,138", "solution": ["Ones: 3 is smaller than 5, so borrow 1 from the next place. 13 − 5 = 8.", "Tens: this place gave 1 to the right, so we borrow again. 9 − 6 = 3.", "Hundreds: this place gave 1 to the right, so we borrow again. 9 − 8 = 1.", "Thousands: 7 lent 1, so 6 − 1 = 5.", "Answer: 5,138."]},
-            {"level": "hard", "q": "8,006 − 2,608 = ?", "answer": "5,398", "solution": ["Ones: 6 is smaller than 8, so borrow 1 from the next place. 16 − 8 = 8.", "Tens: this place gave 1 to the right, so we borrow again. 9 − 0 = 9.", "Hundreds: this place gave 1 to the right, so we borrow again. 9 − 6 = 3.", "Thousands: 8 lent 1, so 7 − 2 = 5.", "Answer: 5,398."]},
-            {"level": "hard", "q": "13 − 19 = ?", "answer": "−6", "solution": ["Start at 13 on the number line.", "Move 19 steps to the left. 13 steps reach 0.", "6 more steps take you to −6."]},
-            {"level": "hard", "q": "9 − 15 = ?", "answer": "−6", "solution": ["Start at 9 on the number line.", "Move 15 steps to the left. 9 steps reach 0.", "6 more steps take you to −6."]},
-            {"level": "hard", "q": "5 − 9 = ?", "answer": "−4", "solution": ["Start at 5 on the number line.", "Move 9 steps to the left. 5 steps reach 0.", "4 more steps take you to −4."]},
-            {"level": "hard", "q": "−3 − 11 = ?", "answer": "−14", "solution": ["Subtracting 11 means moving 11 steps to the left of −3.", "You keep going in the negative direction, so add the sizes: 3 + 11 = 14.", "Answer: −14."]},
-            {"level": "hard", "q": "−5 − 8 = ?", "answer": "−13", "solution": ["Subtracting 8 means moving 8 steps to the left of −5.", "You keep going in the negative direction, so add the sizes: 5 + 8 = 13.", "Answer: −13."]},
-            {"level": "hard", "q": "9,000 − 4,150 − 2,730 = ?", "answer": "2,120", "solution": ["Subtract the first number: 9,000 − 4,150 = 4,850.", "Subtract the second number: 4,850 − 2,730 = 2,120.", "Answer: 2,120."]},
-            {"level": "hard", "q": "11,000 − 1,225 − 1,950 = ?", "answer": "7,825", "solution": ["Subtract the first number: 11,000 − 1,225 = 9,775.", "Subtract the second number: 9,775 − 1,950 = 7,825.", "Answer: 7,825."]},
-            {"level": "hard", "q": "6.16 − 2.34 = ?", "answer": "3.82", "solution": ["Line up the decimal points so the digits match.", "Subtract as whole numbers: 616 − 234 = 382.", "Put the decimal point back, 2 places from the right: 3.82."]},
-            {"level": "hard", "q": "8.43 − 4.50 = ?", "answer": "3.93", "solution": ["Line up the decimal points so the digits match.", "Subtract as whole numbers: 843 − 450 = 393.", "Put the decimal point back, 2 places from the right: 3.93."]},
-            {"level": "hard", "q": "A school had 19,500 books. It gave away 4,120 books in June and 2,300 books in July. How many books are left?", "answer": "13,080", "solution": ["Subtract the first amount: 19,500 − 4,120 = 15,380.", "Subtract the second amount: 15,380 − 2,300 = 13,080.", "Answer: 13,080 books."]},
-            {"level": "hard", "q": "A farm stored 18,500 kg of rice. It sold 4,605 kg on Monday and 1,500 kg on Tuesday. How many kilograms are left?", "answer": "12,395", "solution": ["Subtract the first amount: 18,500 − 4,605 = 13,895.", "Subtract the second amount: 13,895 − 1,500 = 12,395.", "Answer: 12,395 kg."]},
+          lesson:{"title": "How to convert binary to decimal", "idea": "Every bit has a place value, and the values double as you move left: 1, 2, 4, 8, 16 and so on. Add up the place values of the bits that are 1.", "steps": ["Write the place values above the bits. Start with 1 on the far right and double each step to the left.", "Ignore the place values that sit above a 0.", "Add the place values that sit above a 1.", "The total is your decimal number."], "exTitle": "Example: convert 10110 to decimal", "exLines": ["Place values: 16, 8, 4, 2, 1", "Bits: 1, 0, 1, 1, 0", "Keep 16, 4 and 2 (the bits that are 1)", "16 + 4 + 2 = 22"], "exAnswer": "10110 in binary = 22 in decimal", "tip": "Memorize the powers of 2: 1, 2, 4, 8, 16, 32, 64, 128.", "ref": "place"},
+          resources:[],
+          focus:["adding place values of bits that are 1", "bytes up to 255"] },
+        { key:"dec-bin", title:"Decimal to Binary", sub:"Divide by 2, read the remainders", icon:"10→2", small:true,
+          game:{ cta:"Think you can master Decimal to Binary? Answer all 20 questions, beat your best score, and tap Show solution whenever you're stuck!", questions:[
+            // ---------- EASY (7 questions) ----------
+            {"level": "easy", "q": "Convert this decimal number to binary.", "num": "3", "from": 10, "to": 2, "base": 2, "answer": "11", "solution": ["Divide by 2 again and again, keeping each remainder: 3 ÷ 2 = 1 remainder 1; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 1.", "So 3 in binary is 11."]},
+            {"level": "easy", "q": "Convert this decimal number to binary.", "num": "5", "from": 10, "to": 2, "base": 2, "answer": "101", "solution": ["Divide by 2 again and again, keeping each remainder: 5 ÷ 2 = 2 remainder 1; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 1.", "So 5 in binary is 101."]},
+            {"level": "easy", "q": "Convert this decimal number to binary.", "num": "6", "from": 10, "to": 2, "base": 2, "answer": "110", "solution": ["Divide by 2 again and again, keeping each remainder: 6 ÷ 2 = 3 remainder 0; 3 ÷ 2 = 1 remainder 1; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 1 0.", "So 6 in binary is 110."]},
+            {"level": "easy", "q": "Convert this decimal number to binary.", "num": "9", "from": 10, "to": 2, "base": 2, "answer": "1001", "solution": ["Divide by 2 again and again, keeping each remainder: 9 ÷ 2 = 4 remainder 1; 4 ÷ 2 = 2 remainder 0; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 0 1.", "So 9 in binary is 1001."]},
+            {"level": "easy", "q": "Convert this decimal number to binary.", "num": "10", "from": 10, "to": 2, "base": 2, "answer": "1010", "solution": ["Divide by 2 again and again, keeping each remainder: 10 ÷ 2 = 5 remainder 0; 5 ÷ 2 = 2 remainder 1; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 1 0.", "So 10 in binary is 1010."]},
+            {"level": "easy", "q": "Convert this decimal number to binary.", "num": "12", "from": 10, "to": 2, "base": 2, "answer": "1100", "solution": ["Divide by 2 again and again, keeping each remainder: 12 ÷ 2 = 6 remainder 0; 6 ÷ 2 = 3 remainder 0; 3 ÷ 2 = 1 remainder 1; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 1 0 0.", "So 12 in binary is 1100."]},
+            {"level": "easy", "q": "Convert this decimal number to binary.", "num": "15", "from": 10, "to": 2, "base": 2, "answer": "1111", "solution": ["Divide by 2 again and again, keeping each remainder: 15 ÷ 2 = 7 remainder 1; 7 ÷ 2 = 3 remainder 1; 3 ÷ 2 = 1 remainder 1; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 1 1 1.", "So 15 in binary is 1111."]},
+            // ---------- MEDIUM (7 questions) ----------
+            {"level": "medium", "q": "What is this decimal number in binary?", "num": "18", "from": 10, "to": 2, "base": 2, "answer": "10010", "solution": ["Divide by 2 again and again, keeping each remainder: 18 ÷ 2 = 9 remainder 0; 9 ÷ 2 = 4 remainder 1; 4 ÷ 2 = 2 remainder 0; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 0 1 0.", "So 18 in binary is 10010."]},
+            {"level": "medium", "q": "What is this decimal number in binary?", "num": "21", "from": 10, "to": 2, "base": 2, "answer": "10101", "solution": ["Divide by 2 again and again, keeping each remainder: 21 ÷ 2 = 10 remainder 1; 10 ÷ 2 = 5 remainder 0; 5 ÷ 2 = 2 remainder 1; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 1 0 1.", "So 21 in binary is 10101."]},
+            {"level": "medium", "q": "What is this decimal number in binary?", "num": "25", "from": 10, "to": 2, "base": 2, "answer": "11001", "solution": ["Divide by 2 again and again, keeping each remainder: 25 ÷ 2 = 12 remainder 1; 12 ÷ 2 = 6 remainder 0; 6 ÷ 2 = 3 remainder 0; 3 ÷ 2 = 1 remainder 1; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 1 0 0 1.", "So 25 in binary is 11001."]},
+            {"level": "medium", "q": "What is this decimal number in binary?", "num": "30", "from": 10, "to": 2, "base": 2, "answer": "11110", "solution": ["Divide by 2 again and again, keeping each remainder: 30 ÷ 2 = 15 remainder 0; 15 ÷ 2 = 7 remainder 1; 7 ÷ 2 = 3 remainder 1; 3 ÷ 2 = 1 remainder 1; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 1 1 1 0.", "So 30 in binary is 11110."]},
+            {"level": "medium", "q": "What is this decimal number in binary?", "num": "33", "from": 10, "to": 2, "base": 2, "answer": "100001", "solution": ["Divide by 2 again and again, keeping each remainder: 33 ÷ 2 = 16 remainder 1; 16 ÷ 2 = 8 remainder 0; 8 ÷ 2 = 4 remainder 0; 4 ÷ 2 = 2 remainder 0; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 0 0 0 1.", "So 33 in binary is 100001."]},
+            {"level": "medium", "q": "What is this decimal number in binary?", "num": "40", "from": 10, "to": 2, "base": 2, "answer": "101000", "solution": ["Divide by 2 again and again, keeping each remainder: 40 ÷ 2 = 20 remainder 0; 20 ÷ 2 = 10 remainder 0; 10 ÷ 2 = 5 remainder 0; 5 ÷ 2 = 2 remainder 1; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 1 0 0 0.", "So 40 in binary is 101000."]},
+            {"level": "medium", "q": "What is this decimal number in binary?", "num": "45", "from": 10, "to": 2, "base": 2, "answer": "101101", "solution": ["Divide by 2 again and again, keeping each remainder: 45 ÷ 2 = 22 remainder 1; 22 ÷ 2 = 11 remainder 0; 11 ÷ 2 = 5 remainder 1; 5 ÷ 2 = 2 remainder 1; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 1 1 0 1.", "So 45 in binary is 101101."]},
+            // ---------- HARD (6 questions) ----------
+            {"level": "hard", "q": "Convert this decimal number to binary.", "num": "64", "from": 10, "to": 2, "base": 2, "answer": "1000000", "solution": ["Divide by 2 again and again, keeping each remainder: 64 ÷ 2 = 32 remainder 0; 32 ÷ 2 = 16 remainder 0; 16 ÷ 2 = 8 remainder 0; 8 ÷ 2 = 4 remainder 0; 4 ÷ 2 = 2 remainder 0; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 0 0 0 0 0.", "So 64 in binary is 1000000."]},
+            {"level": "hard", "q": "Convert this decimal number to binary.", "num": "100", "from": 10, "to": 2, "base": 2, "answer": "1100100", "solution": ["Divide by 2 again and again, keeping each remainder: 100 ÷ 2 = 50 remainder 0; 50 ÷ 2 = 25 remainder 0; 25 ÷ 2 = 12 remainder 1; 12 ÷ 2 = 6 remainder 0; 6 ÷ 2 = 3 remainder 0; 3 ÷ 2 = 1 remainder 1; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 1 0 0 1 0 0.", "So 100 in binary is 1100100."]},
+            {"level": "hard", "q": "Convert this decimal number to binary.", "num": "128", "from": 10, "to": 2, "base": 2, "answer": "10000000", "solution": ["Divide by 2 again and again, keeping each remainder: 128 ÷ 2 = 64 remainder 0; 64 ÷ 2 = 32 remainder 0; 32 ÷ 2 = 16 remainder 0; 16 ÷ 2 = 8 remainder 0; 8 ÷ 2 = 4 remainder 0; 4 ÷ 2 = 2 remainder 0; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 0 0 0 0 0 0.", "So 128 in binary is 10000000."]},
+            {"level": "hard", "q": "Convert this decimal number to binary.", "num": "150", "from": 10, "to": 2, "base": 2, "answer": "10010110", "solution": ["Divide by 2 again and again, keeping each remainder: 150 ÷ 2 = 75 remainder 0; 75 ÷ 2 = 37 remainder 1; 37 ÷ 2 = 18 remainder 1; 18 ÷ 2 = 9 remainder 0; 9 ÷ 2 = 4 remainder 1; 4 ÷ 2 = 2 remainder 0; 2 ÷ 2 = 1 remainder 0; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 0 0 1 0 1 1 0.", "So 150 in binary is 10010110."]},
+            {"level": "hard", "q": "Convert this decimal number to binary.", "num": "200", "from": 10, "to": 2, "base": 2, "answer": "11001000", "solution": ["Divide by 2 again and again, keeping each remainder: 200 ÷ 2 = 100 remainder 0; 100 ÷ 2 = 50 remainder 0; 50 ÷ 2 = 25 remainder 0; 25 ÷ 2 = 12 remainder 1; 12 ÷ 2 = 6 remainder 0; 6 ÷ 2 = 3 remainder 0; 3 ÷ 2 = 1 remainder 1; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 1 0 0 1 0 0 0.", "So 200 in binary is 11001000."]},
+            {"level": "hard", "q": "This is the biggest value one byte can hold. Write it in binary.", "num": "255", "from": 10, "to": 2, "base": 2, "answer": "11111111", "solution": ["Divide by 2 again and again, keeping each remainder: 255 ÷ 2 = 127 remainder 1; 127 ÷ 2 = 63 remainder 1; 63 ÷ 2 = 31 remainder 1; 31 ÷ 2 = 15 remainder 1; 15 ÷ 2 = 7 remainder 1; 7 ÷ 2 = 3 remainder 1; 3 ÷ 2 = 1 remainder 1; 1 ÷ 2 = 0 remainder 1.", "Read the remainders from the last one up to the first one: 1 1 1 1 1 1 1 1.", "So 255 in binary is 11111111."]},
           ] },
-          resources:[
-            { type:'video', staticId:'video-subtraction' }, // video is written in plain HTML in gen-portal.html
-          ], focus:[
-          'subtracting two- and three-digit whole numbers', 'subtracting with borrowing (regrouping)',
-          'subtracting decimals', 'finding a missing number in a subtraction problem', 'simple subtraction word problems'] },
-        { key:'multiplication', title:'Multiplication', sub:'Repeated addition', icon:'\u00D7',
-          game:{ levels:true, questions:[
-            // ---------- EASY (20 questions) ----------
-            {"level": "easy", "q": "3 × 4 = ?", "answer": "12", "solution": ["3 groups of 4 is 4 + 4 + 4.", "4 + 4 = 8, and 8 + 4 = 12.", "So 3 × 4 = 12."]},
-            {"level": "easy", "q": "5 × 6 = ?", "answer": "30", "solution": ["Count by 5s six times: 5, 10, 15, 20, 25, 30.", "So 5 × 6 = 30."]},
-            {"level": "easy", "q": "7 × 2 = ?", "answer": "14", "solution": ["Multiplying by 2 means doubling.", "Double 7: 7 + 7 = 14.", "So 7 × 2 = 14."]},
-            {"level": "easy", "q": "10 × 8 = ?", "answer": "80", "solution": ["Multiplying by 10 puts a zero on the end.", "8 with a zero on the end is 80.", "So 10 × 8 = 80."]},
-            {"level": "easy", "q": "There are 4 bags with 5 oranges in each bag. How many oranges are there in all?", "answer": "20", "solution": ["4 bags with 5 oranges each: 4 × 5.", "5 + 5 + 5 + 5 = 20.", "There are 20 oranges."]},
-            {"level": "easy", "q": "3 × 8 = ?", "answer": "24", "solution": ["3 groups of 8 is 8 + 8 + 8.", "Add them up to get 24.", "So 3 × 8 = 24."]},
-            {"level": "easy", "q": "2 × 6 = ?", "answer": "12", "solution": ["2 groups of 6 is 6 + 6.", "Add them up to get 12.", "So 2 × 6 = 12."]},
-            {"level": "easy", "q": "2 × 7 = ?", "answer": "14", "solution": ["2 groups of 7 is 7 + 7.", "Add them up to get 14.", "So 2 × 7 = 14."]},
-            {"level": "easy", "q": "4 × 4 = ?", "answer": "16", "solution": ["4 groups of 4 is 4 + 4 + 4 + 4.", "Add them up to get 16.", "So 4 × 4 = 16."]},
-            {"level": "easy", "q": "7 × 3 = ?", "answer": "21", "solution": ["Use the 7 times table.", "Count by 7s: 7, 14, 21.", "So 7 × 3 = 21."]},
-            {"level": "easy", "q": "9 × 4 = ?", "answer": "36", "solution": ["Use the 9 times table.", "Count by 9s: 9, 18, 27, 36.", "So 9 × 4 = 36."]},
-            {"level": "easy", "q": "6 × 7 = ?", "answer": "42", "solution": ["Use the 6 times table.", "Count by 6s: 6, 12, 18, 24, 30, 36, 42.", "So 6 × 7 = 42."]},
-            {"level": "easy", "q": "9 × 3 = ?", "answer": "27", "solution": ["Use the 9 times table.", "Count by 9s: 9, 18, 27.", "So 9 × 3 = 27."]},
-            {"level": "easy", "q": "10 × 10 = ?", "answer": "100", "solution": ["Multiplying by 10 puts a zero on the end.", "10 with a zero on the end is 100.", "So 10 × 10 = 100."]},
-            {"level": "easy", "q": "12 × 10 = ?", "answer": "120", "solution": ["Multiplying by 10 puts a zero on the end.", "12 with a zero on the end is 120.", "So 12 × 10 = 120."]},
-            {"level": "easy", "q": "What is double 14?", "answer": "28", "solution": ["Double means multiply by 2.", "14 + 14 = 28.", "So double 14 is 28."]},
-            {"level": "easy", "q": "What is double 25?", "answer": "50", "solution": ["Double means multiply by 2.", "25 + 25 = 50.", "So double 25 is 50."]},
-            {"level": "easy", "q": "There are 6 bags with 5 books in each bag. How many books are there in all?", "answer": "30", "solution": ["6 bags with 5 books each: 6 × 5.", "Count by 5s: 5, 10, 15, 20, 25, 30.", "There are 30 books."]},
-            {"level": "easy", "q": "There are 7 bags with 3 shells in each bag. How many shells are there in all?", "answer": "21", "solution": ["7 bags with 3 shells each: 7 × 3.", "Count by 3s: 3, 6, 9, 12, 15, 18, 21.", "There are 21 shells."]},
-            {"level": "easy", "q": "There are 5 bags with 3 cookies in each bag. How many cookies are there in all?", "answer": "15", "solution": ["5 bags with 3 cookies each: 5 × 3.", "Count by 3s: 3, 6, 9, 12, 15.", "There are 15 cookies."]},
-            // ---------- MEDIUM (20 questions) ----------
-            {"level": "medium", "q": "12 × 7 = ?", "answer": "84", "solution": ["Split 12 into 10 + 2.", "10 × 7 = 70 and 2 × 7 = 14.", "70 + 14 = 84."]},
-            {"level": "medium", "q": "23 × 4 = ?", "answer": "92", "solution": ["Split 23 into 20 + 3.", "20 × 4 = 80 and 3 × 4 = 12.", "80 + 12 = 92."]},
-            {"level": "medium", "q": "34 × 6 = ?", "answer": "204", "solution": ["Split 34 into 30 + 4.", "30 × 6 = 180 and 4 × 6 = 24.", "180 + 24 = 204."]},
-            {"level": "medium", "q": "45 × 12 = ?", "answer": "540", "solution": ["Split 12 into 10 + 2.", "45 × 10 = 450 and 45 × 2 = 90.", "450 + 90 = 540."]},
-            {"level": "medium", "q": "A box holds 24 pencils. How many pencils are in 9 boxes?", "answer": "216", "solution": ["9 boxes of 24 pencils: 24 × 9.", "20 × 9 = 180 and 4 × 9 = 36.", "180 + 36 = 216 pencils."]},
-            {"level": "medium", "q": "32 × 8 = ?", "answer": "256", "solution": ["Split 32 into 30 + 2.", "30 × 8 = 240; 2 × 8 = 16.", "240 + 16 = 256."]},
-            {"level": "medium", "q": "21 × 5 = ?", "answer": "105", "solution": ["Split 21 into 20 + 1.", "20 × 5 = 100; 1 × 5 = 5.", "100 + 5 = 105."]},
-            {"level": "medium", "q": "25 × 8 = ?", "answer": "200", "solution": ["Split 25 into 20 + 5.", "20 × 8 = 160; 5 × 8 = 40.", "160 + 40 = 200."]},
-            {"level": "medium", "q": "40 × 5 = ?", "answer": "200", "solution": ["Split 40 into 40.", "40 × 5 = 200.", "200 = 200."]},
-            {"level": "medium", "q": "47 × 6 = ?", "answer": "282", "solution": ["Split 47 into 40 + 7.", "40 × 6 = 240; 7 × 6 = 42.", "240 + 42 = 282."]},
-            {"level": "medium", "q": "42 × 15 = ?", "answer": "630", "solution": ["Split 15 into 10 + 5.", "42 × 10 = 420 and 42 × 5 = 210.", "420 + 210 = 630."]},
-            {"level": "medium", "q": "21 × 12 = ?", "answer": "252", "solution": ["Split 12 into 10 + 2.", "21 × 10 = 210 and 21 × 2 = 42.", "210 + 42 = 252."]},
-            {"level": "medium", "q": "12 × 15 = ?", "answer": "180", "solution": ["Split 15 into 10 + 5.", "12 × 10 = 120 and 12 × 5 = 60.", "120 + 60 = 180."]},
-            {"level": "medium", "q": "141 × 3 = ?", "answer": "423", "solution": ["Split 141 into 100 + 40 + 1.", "100 × 3 = 300; 40 × 3 = 120; 1 × 3 = 3.", "300 + 120 + 3 = 423."]},
-            {"level": "medium", "q": "276 × 8 = ?", "answer": "2,208", "solution": ["Split 276 into 200 + 70 + 6.", "200 × 8 = 1,600; 70 × 8 = 560; 6 × 8 = 48.", "1,600 + 560 + 48 = 2,208."]},
-            {"level": "medium", "q": "380 × 6 = ?", "answer": "2,280", "solution": ["Split 380 into 300 + 80.", "300 × 6 = 1,800; 80 × 6 = 480.", "1,800 + 480 = 2,280."]},
-            {"level": "medium", "q": "A bus can carry 33 students. How many students can 5 buses carry?", "answer": "165", "solution": ["Multiply the amount in one group by the number of groups: 33 × 5.", "Split 33 into 30 + 3.", "30 × 5 = 150; 3 × 5 = 15.", "Answer: 165 students."]},
-            {"level": "medium", "q": "A bus can carry 18 students. How many students can 9 buses carry?", "answer": "162", "solution": ["Multiply the amount in one group by the number of groups: 18 × 9.", "Split 18 into 10 + 8.", "10 × 9 = 90; 8 × 9 = 72.", "Answer: 162 students."]},
-            {"level": "medium", "q": "A bus can carry 13 students. How many students can 5 buses carry?", "answer": "65", "solution": ["Multiply the amount in one group by the number of groups: 13 × 5.", "Split 13 into 10 + 3.", "10 × 5 = 50; 3 × 5 = 15.", "Answer: 65 students."]},
-            {"level": "medium", "q": "A box holds 21 pencils. How many pencils are in 5 boxes?", "answer": "105", "solution": ["Multiply the amount in one group by the number of groups: 21 × 5.", "Split 21 into 20 + 1.", "20 × 5 = 100; 1 × 5 = 5.", "Answer: 105 pencils."]},
-            // ---------- HARD (20 questions) ----------
-            {"level": "hard", "q": "123 × 45 = ?", "answer": "5,535", "solution": ["Split 45 into 40 + 5.", "123 × 40 = 4,920 and 123 × 5 = 615.", "4,920 + 615 = 5,535."]},
-            {"level": "hard", "q": "346 × 28 = ?", "answer": "9,688", "solution": ["Split 28 into 20 + 8.", "346 × 20 = 6,920 and 346 × 8 = 2,768.", "6,920 + 2,768 = 9,688."]},
-            {"level": "hard", "q": "−7 × 6 = ?", "answer": "−42", "solution": ["Multiply the sizes first: 7 × 6 = 42.", "A negative times a positive is negative.", "Answer: −42."]},
-            {"level": "hard", "q": "1,205 × 13 = ?", "answer": "15,665", "solution": ["Split 13 into 10 + 3.", "1,205 × 10 = 12,050 and 1,205 × 3 = 3,615.", "12,050 + 3,615 = 15,665."]},
-            {"level": "hard", "q": "A bus carries 48 passengers on each trip. How many passengers does it carry in 125 trips?", "answer": "6,000", "solution": ["One trip carries 48 passengers, so multiply: 48 × 125.", "125 × 48 = 125 × 50 − 125 × 2 = 6,250 − 250.", "6,250 − 250 = 6,000 passengers."]},
-            {"level": "hard", "q": "139 × 15 = ?", "answer": "2,085", "solution": ["Split 15 into 10 + 5.", "139 × 10 = 1,390 and 139 × 5 = 695.", "1,390 + 695 = 2,085."]},
-            {"level": "hard", "q": "154 × 27 = ?", "answer": "4,158", "solution": ["Split 27 into 20 + 7.", "154 × 20 = 3,080 and 154 × 7 = 1,078.", "3,080 + 1,078 = 4,158."]},
-            {"level": "hard", "q": "169 × 47 = ?", "answer": "7,943", "solution": ["Split 47 into 40 + 7.", "169 × 40 = 6,760 and 169 × 7 = 1,183.", "6,760 + 1,183 = 7,943."]},
-            {"level": "hard", "q": "462 × 28 = ?", "answer": "12,936", "solution": ["Split 28 into 20 + 8.", "462 × 20 = 9,240 and 462 × 8 = 3,696.", "9,240 + 3,696 = 12,936."]},
-            {"level": "hard", "q": "1,791 × 4 = ?", "answer": "7,164", "solution": ["Split 1,791 into 1,000 + 700 + 90 + 1.", "1,000 × 4 = 4,000; 700 × 4 = 2,800; 90 × 4 = 360; 1 × 4 = 4.", "4,000 + 2,800 + 360 + 4 = 7,164."]},
-            {"level": "hard", "q": "4,271 × 8 = ?", "answer": "34,168", "solution": ["Split 4,271 into 4,000 + 200 + 70 + 1.", "4,000 × 8 = 32,000; 200 × 8 = 1,600; 70 × 8 = 560; 1 × 8 = 8.", "32,000 + 1,600 + 560 + 8 = 34,168."]},
-            {"level": "hard", "q": "−3 × 5 = ?", "answer": "−15", "solution": ["Multiply the sizes first: 3 × 5 = 15.", "A negative times a positive is negative.", "Answer: −15."]},
-            {"level": "hard", "q": "−15 × 9 = ?", "answer": "−135", "solution": ["Multiply the sizes first: 15 × 9 = 135.", "A negative times a positive is negative.", "Answer: −135."]},
-            {"level": "hard", "q": "−7 × (−12) = ?", "answer": "84", "solution": ["Multiply the sizes first: 7 × 12 = 84.", "A negative times a negative is positive.", "Answer: 84."]},
-            {"level": "hard", "q": "55 × 45 = ?", "answer": "2,475", "solution": ["Split 45 into 40 + 5.", "55 × 40 = 2,200 and 55 × 5 = 275.", "2,200 + 275 = 2,475."]},
-            {"level": "hard", "q": "66 × 88 = ?", "answer": "5,808", "solution": ["Split 88 into 80 + 8.", "66 × 80 = 5,280 and 66 × 8 = 528.", "5,280 + 528 = 5,808."]},
-            {"level": "hard", "q": "A cinema has 451 seats in each hall. How many seats are in 19 halls?", "answer": "8,569", "solution": ["Multiply: 451 × 19.", "Split 19 into 10 + 9.", "451 × 10 = 4,510 and 451 × 9 = 4,059.", "Answer: 8,569 seats."]},
-            {"level": "hard", "q": "A factory makes 368 toys every day. How many toys does it make in 17 days?", "answer": "6,256", "solution": ["Multiply: 368 × 17.", "Split 17 into 10 + 7.", "368 × 10 = 3,680 and 368 × 7 = 2,576.", "Answer: 6,256 toys."]},
-            {"level": "hard", "q": "A cinema has 184 seats in each hall. How many seats are in 38 halls?", "answer": "6,992", "solution": ["Multiply: 184 × 38.", "Split 38 into 30 + 8.", "184 × 30 = 5,520 and 184 × 8 = 1,472.", "Answer: 6,992 seats."]},
-            {"level": "hard", "q": "A bus carries 232 passengers on each trip. How many passengers does it carry in 22 trips?", "answer": "5,104", "solution": ["Multiply: 232 × 22.", "Split 22 into 20 + 2.", "232 × 20 = 4,640 and 232 × 2 = 464.", "Answer: 5,104 passengers."]},
+          lesson:{"title": "How to convert decimal to binary", "idea": "Keep dividing the number by 2 and write down each remainder. The remainders, read from the bottom up, are the binary number.", "steps": ["Divide the number by 2 and write the remainder (it is always 0 or 1).", "Divide the answer (the quotient) by 2 again and write the new remainder.", "Repeat until the quotient reaches 0.", "Read the remainders from the last one to the first one. That is your binary number."], "exTitle": "Example: convert 22 to binary", "exLines": ["22 ÷ 2 = 11 remainder 0", "11 ÷ 2 = 5 remainder 1", "5 ÷ 2 = 2 remainder 1", "2 ÷ 2 = 1 remainder 0", "1 ÷ 2 = 0 remainder 1", "Read the remainders from the bottom up: 1 0 1 1 0"], "exAnswer": "22 in decimal = 10110 in binary", "tip": "Check your work by converting back with place values.", "ref": "place"},
+          resources:[],
+          focus:["repeated division by 2", "reading remainders bottom to top"] }
+      ] },
+      { label: "Binary and octal", tone: 'b', topics: [
+        { key:"bin-oct", title:"Binary to Octal", sub:"Group the bits in threes", icon:"2→8", small:true,
+          game:{ cta:"Think you can master Binary to Octal? Answer all 20 questions, beat your best score, and tap Show solution whenever you're stuck!", questions:[
+            // ---------- EASY (7 questions) ----------
+            {"level": "easy", "q": "Convert this binary number to octal.", "num": "101", "from": 2, "to": 8, "base": 8, "answer": "5", "solution": ["Split the bits into groups of 3, starting from the right: 101.", "Convert each group to one digit: 101 = 5.", "Write the digits side by side: 5."]},
+            {"level": "easy", "q": "Convert this binary number to octal.", "num": "110", "from": 2, "to": 8, "base": 8, "answer": "6", "solution": ["Split the bits into groups of 3, starting from the right: 110.", "Convert each group to one digit: 110 = 6.", "Write the digits side by side: 6."]},
+            {"level": "easy", "q": "Convert this binary number to octal.", "num": "111", "from": 2, "to": 8, "base": 8, "answer": "7", "solution": ["Split the bits into groups of 3, starting from the right: 111.", "Convert each group to one digit: 111 = 7.", "Write the digits side by side: 7."]},
+            {"level": "easy", "q": "Convert this binary number to octal.", "num": "1010", "from": 2, "to": 8, "base": 8, "answer": "12", "solution": ["Split the bits into groups of 3, starting from the right (add 2 zeros on the left to fill the first group): 001 | 010.", "Convert each group to one digit: 001 = 1, 010 = 2.", "Write the digits side by side: 12."]},
+            {"level": "easy", "q": "Convert this binary number to octal.", "num": "1101", "from": 2, "to": 8, "base": 8, "answer": "15", "solution": ["Split the bits into groups of 3, starting from the right (add 2 zeros on the left to fill the first group): 001 | 101.", "Convert each group to one digit: 001 = 1, 101 = 5.", "Write the digits side by side: 15."]},
+            {"level": "easy", "q": "Convert this binary number to octal.", "num": "1111", "from": 2, "to": 8, "base": 8, "answer": "17", "solution": ["Split the bits into groups of 3, starting from the right (add 2 zeros on the left to fill the first group): 001 | 111.", "Convert each group to one digit: 001 = 1, 111 = 7.", "Write the digits side by side: 17."]},
+            {"level": "easy", "q": "Convert this binary number to octal.", "num": "10000", "from": 2, "to": 8, "base": 8, "answer": "20", "solution": ["Split the bits into groups of 3, starting from the right (add 1 zero on the left to fill the first group): 010 | 000.", "Convert each group to one digit: 010 = 2, 000 = 0.", "Write the digits side by side: 20."]},
+            // ---------- MEDIUM (7 questions) ----------
+            {"level": "medium", "q": "What is this binary number in octal?", "num": "101110", "from": 2, "to": 8, "base": 8, "answer": "56", "solution": ["Split the bits into groups of 3, starting from the right: 101 | 110.", "Convert each group to one digit: 101 = 5, 110 = 6.", "Write the digits side by side: 56."]},
+            {"level": "medium", "q": "What is this binary number in octal?", "num": "110101", "from": 2, "to": 8, "base": 8, "answer": "65", "solution": ["Split the bits into groups of 3, starting from the right: 110 | 101.", "Convert each group to one digit: 110 = 6, 101 = 5.", "Write the digits side by side: 65."]},
+            {"level": "medium", "q": "What is this binary number in octal?", "num": "111000", "from": 2, "to": 8, "base": 8, "answer": "70", "solution": ["Split the bits into groups of 3, starting from the right: 111 | 000.", "Convert each group to one digit: 111 = 7, 000 = 0.", "Write the digits side by side: 70."]},
+            {"level": "medium", "q": "What is this binary number in octal?", "num": "100111", "from": 2, "to": 8, "base": 8, "answer": "47", "solution": ["Split the bits into groups of 3, starting from the right: 100 | 111.", "Convert each group to one digit: 100 = 4, 111 = 7.", "Write the digits side by side: 47."]},
+            {"level": "medium", "q": "What is this binary number in octal?", "num": "1001001", "from": 2, "to": 8, "base": 8, "answer": "111", "solution": ["Split the bits into groups of 3, starting from the right (add 2 zeros on the left to fill the first group): 001 | 001 | 001.", "Convert each group to one digit: 001 = 1, 001 = 1, 001 = 1.", "Write the digits side by side: 111."]},
+            {"level": "medium", "q": "What is this binary number in octal?", "num": "1011011", "from": 2, "to": 8, "base": 8, "answer": "133", "solution": ["Split the bits into groups of 3, starting from the right (add 2 zeros on the left to fill the first group): 001 | 011 | 011.", "Convert each group to one digit: 001 = 1, 011 = 3, 011 = 3.", "Write the digits side by side: 133."]},
+            {"level": "medium", "q": "What is this binary number in octal?", "num": "1110101", "from": 2, "to": 8, "base": 8, "answer": "165", "solution": ["Split the bits into groups of 3, starting from the right (add 2 zeros on the left to fill the first group): 001 | 110 | 101.", "Convert each group to one digit: 001 = 1, 110 = 6, 101 = 5.", "Write the digits side by side: 165."]},
+            // ---------- HARD (6 questions) ----------
+            {"level": "hard", "q": "Convert this binary number to octal.", "num": "11010110", "from": 2, "to": 8, "base": 8, "answer": "326", "solution": ["Split the bits into groups of 3, starting from the right (add 1 zero on the left to fill the first group): 011 | 010 | 110.", "Convert each group to one digit: 011 = 3, 010 = 2, 110 = 6.", "Write the digits side by side: 326."]},
+            {"level": "hard", "q": "Convert this binary number to octal.", "num": "10111001", "from": 2, "to": 8, "base": 8, "answer": "271", "solution": ["Split the bits into groups of 3, starting from the right (add 1 zero on the left to fill the first group): 010 | 111 | 001.", "Convert each group to one digit: 010 = 2, 111 = 7, 001 = 1.", "Write the digits side by side: 271."]},
+            {"level": "hard", "q": "Convert this binary number to octal.", "num": "11111111", "from": 2, "to": 8, "base": 8, "answer": "377", "solution": ["Split the bits into groups of 3, starting from the right (add 1 zero on the left to fill the first group): 011 | 111 | 111.", "Convert each group to one digit: 011 = 3, 111 = 7, 111 = 7.", "Write the digits side by side: 377."]},
+            {"level": "hard", "q": "Convert this binary number to octal.", "num": "101010101", "from": 2, "to": 8, "base": 8, "answer": "525", "solution": ["Split the bits into groups of 3, starting from the right: 101 | 010 | 101.", "Convert each group to one digit: 101 = 5, 010 = 2, 101 = 5.", "Write the digits side by side: 525."]},
+            {"level": "hard", "q": "Convert this binary number to octal.", "num": "110011001", "from": 2, "to": 8, "base": 8, "answer": "631", "solution": ["Split the bits into groups of 3, starting from the right: 110 | 011 | 001.", "Convert each group to one digit: 110 = 6, 011 = 3, 001 = 1.", "Write the digits side by side: 631."]},
+            {"level": "hard", "q": "Convert this binary number to octal.", "num": "1000000000", "from": 2, "to": 8, "base": 8, "answer": "1000", "solution": ["Split the bits into groups of 3, starting from the right (add 2 zeros on the left to fill the first group): 001 | 000 | 000 | 000.", "Convert each group to one digit: 001 = 1, 000 = 0, 000 = 0, 000 = 0.", "Write the digits side by side: 1000."]},
           ] },
-          resources:[
-            { type:'video', staticId:'video-multiplication' }, // videos are written in plain HTML in gen-portal.html
-          ], focus:[
-          'multiplication facts up to 12 x 12', 'multiplying multi-digit numbers by one digit',
-          'multiplying decimals by whole numbers', 'multiples of a number', 'simple multiplication word problems'] },
-        { key:'division', title:'Division', sub:'Share equally', icon:'\u00F7',
-          game:{ levels:true, questions:[
-            // ---------- EASY (20 questions) ----------
-            {"level": "easy", "q": "12 ÷ 3 = ?", "answer": "4", "solution": ["Share 12 equally into 3 groups.", "Each group gets 4, because 3 × 4 = 12.", "So 12 ÷ 3 = 4."]},
-            {"level": "easy", "q": "20 ÷ 5 = ?", "answer": "4", "solution": ["Ask: 5 times what number is 20?", "5 × 4 = 20.", "So 20 ÷ 5 = 4."]},
-            {"level": "easy", "q": "18 ÷ 2 = ?", "answer": "9", "solution": ["Dividing by 2 means halving.", "Half of 18 is 9.", "So 18 ÷ 2 = 9."]},
-            {"level": "easy", "q": "36 ÷ 6 = ?", "answer": "6", "solution": ["Think of the 6 times table: 6 × 6 = 36.", "So 36 ÷ 6 = 6."]},
-            {"level": "easy", "q": "15 candies are shared equally among 3 children. How many candies does each child get?", "answer": "5", "solution": ["Share 15 candies equally among 3 children: 15 ÷ 3.", "3 × 5 = 15.", "Each child gets 5 candies."]},
-            {"level": "easy", "q": "15 ÷ 3 = ?", "answer": "5", "solution": ["Ask: 3 times what number is 15?", "3 × 5 = 15.", "So 15 ÷ 3 = 5."]},
-            {"level": "easy", "q": "32 ÷ 8 = ?", "answer": "4", "solution": ["Ask: 8 times what number is 32?", "8 × 4 = 32.", "So 32 ÷ 8 = 4."]},
-            {"level": "easy", "q": "56 ÷ 8 = ?", "answer": "7", "solution": ["Ask: 8 times what number is 56?", "8 × 7 = 56.", "So 56 ÷ 8 = 7."]},
-            {"level": "easy", "q": "12 ÷ 4 = ?", "answer": "3", "solution": ["Ask: 4 times what number is 12?", "4 × 3 = 12.", "So 12 ÷ 4 = 3."]},
-            {"level": "easy", "q": "24 ÷ 8 = ?", "answer": "3", "solution": ["Ask: 8 times what number is 24?", "8 × 3 = 24.", "So 24 ÷ 8 = 3."]},
-            {"level": "easy", "q": "25 ÷ 5 = ?", "answer": "5", "solution": ["Ask: 5 times what number is 25?", "5 × 5 = 25.", "So 25 ÷ 5 = 5."]},
-            {"level": "easy", "q": "18 ÷ 9 = ?", "answer": "2", "solution": ["Ask: 9 times what number is 18?", "9 × 2 = 18.", "So 18 ÷ 9 = 2."]},
-            {"level": "easy", "q": "12 ÷ 2 = ?", "answer": "6", "solution": ["Ask: 2 times what number is 12?", "2 × 6 = 12.", "So 12 ÷ 2 = 6."]},
-            {"level": "easy", "q": "40 ÷ 10 = ?", "answer": "4", "solution": ["Dividing by 10 takes a zero off the end.", "40 without its zero is 4.", "So 40 ÷ 10 = 4."]},
-            {"level": "easy", "q": "30 ÷ 10 = ?", "answer": "3", "solution": ["Dividing by 10 takes a zero off the end.", "30 without its zero is 3.", "So 30 ÷ 10 = 3."]},
-            {"level": "easy", "q": "What is half of 60?", "answer": "30", "solution": ["Half means divide by 2.", "30 + 30 = 60, so each half is 30.", "Half of 60 is 30."]},
-            {"level": "easy", "q": "What is half of 34?", "answer": "17", "solution": ["Half means divide by 2.", "17 + 17 = 34, so each half is 17.", "Half of 34 is 17."]},
-            {"level": "easy", "q": "16 pencils are shared equally among 2 children. How many pencils does each child get?", "answer": "8", "solution": ["Share equally: 16 ÷ 2.", "2 × 8 = 16.", "Each child gets 8 pencils."]},
-            {"level": "easy", "q": "20 balloons are shared equally among 4 children. How many balloons does each child get?", "answer": "5", "solution": ["Share equally: 20 ÷ 4.", "4 × 5 = 20.", "Each child gets 5 balloons."]},
-            {"level": "easy", "q": "36 cookies are shared equally among 6 children. How many cookies does each child get?", "answer": "6", "solution": ["Share equally: 36 ÷ 6.", "6 × 6 = 36.", "Each child gets 6 cookies."]},
-            // ---------- MEDIUM (20 questions) ----------
-            {"level": "medium", "q": "84 ÷ 4 = ?", "answer": "21", "solution": ["Split 84 into 80 + 4.", "80 ÷ 4 = 20 and 4 ÷ 4 = 1.", "20 + 1 = 21."]},
-            {"level": "medium", "q": "156 ÷ 12 = ?", "answer": "13", "solution": ["Ask: 12 times what number is 156?", "12 × 10 = 120, and 156 − 120 = 36, which is 12 × 3.", "10 + 3 = 13."]},
-            {"level": "medium", "q": "225 ÷ 15 = ?", "answer": "15", "solution": ["15 × 10 = 150, and 225 − 150 = 75.", "75 ÷ 15 = 5, because 15 × 5 = 75.", "10 + 5 = 15."]},
-            {"level": "medium", "q": "408 ÷ 6 = ?", "answer": "68", "solution": ["Split 408 into 360 + 48.", "360 ÷ 6 = 60 and 48 ÷ 6 = 8.", "60 + 8 = 68."]},
-            {"level": "medium", "q": "192 students are split into 8 equal groups. How many students are in each group?", "answer": "24", "solution": ["192 students into 8 equal groups: 192 ÷ 8.", "160 ÷ 8 = 20 and 32 ÷ 8 = 4.", "20 + 4 = 24 students in each group."]},
-            {"level": "medium", "q": "232 ÷ 8 = ?", "answer": "29", "solution": ["Ask: 8 times what number gives 232? Build it in chunks.", "8 × 20 = 160; 8 × 9 = 72.", "160 + 72 = 232, so the chunks 20 + 9 give 29."]},
-            {"level": "medium", "q": "168 ÷ 7 = ?", "answer": "24", "solution": ["Ask: 7 times what number gives 168? Build it in chunks.", "7 × 20 = 140; 7 × 4 = 28.", "140 + 28 = 168, so the chunks 20 + 4 give 24."]},
-            {"level": "medium", "q": "130 ÷ 5 = ?", "answer": "26", "solution": ["Ask: 5 times what number gives 130? Build it in chunks.", "5 × 20 = 100; 5 × 6 = 30.", "100 + 30 = 130, so the chunks 20 + 6 give 26."]},
-            {"level": "medium", "q": "85 ÷ 5 = ?", "answer": "17", "solution": ["Ask: 5 times what number gives 85? Build it in chunks.", "5 × 10 = 50; 5 × 7 = 35.", "50 + 35 = 85, so the chunks 10 + 7 give 17."]},
-            {"level": "medium", "q": "324 ÷ 9 = ?", "answer": "36", "solution": ["Ask: 9 times what number gives 324? Build it in chunks.", "9 × 30 = 270; 9 × 6 = 54.", "270 + 54 = 324, so the chunks 30 + 6 give 36."]},
-            {"level": "medium", "q": "372 ÷ 4 = ?", "answer": "93", "solution": ["Ask: 4 times what number gives 372? Build it in chunks.", "4 × 90 = 360; 4 × 3 = 12.", "360 + 12 = 372, so the chunks 90 + 3 give 93."]},
-            {"level": "medium", "q": "266 ÷ 7 = ?", "answer": "38", "solution": ["Ask: 7 times what number gives 266? Build it in chunks.", "7 × 30 = 210; 7 × 8 = 56.", "210 + 56 = 266, so the chunks 30 + 8 give 38."]},
-            {"level": "medium", "q": "114 ÷ 19 = ?", "answer": "6", "solution": ["Ask: 19 times what number gives 114? Build it in chunks.", "19 × 6 = 114.", "114 = 114, so the chunks 6 give 6."]},
-            {"level": "medium", "q": "55 ÷ 11 = ?", "answer": "5", "solution": ["Ask: 11 times what number is 55?", "11 × 5 = 55.", "So 55 ÷ 11 = 5."]},
-            {"level": "medium", "q": "33 ÷ 11 = ?", "answer": "3", "solution": ["Ask: 11 times what number is 33?", "11 × 3 = 33.", "So 33 ÷ 11 = 3."]},
-            {"level": "medium", "q": "A ribbon 440 cm long is cut into 10 equal pieces. How long is each piece, in cm?", "answer": "44", "solution": ["Share equally: 440 ÷ 10.", "10 × 40 = 400; 10 × 4 = 40.", "400 + 40 = 440, so the chunks 40 + 4 give 44.", "Answer: 44 cm each."]},
-            {"level": "medium", "q": "57 students are split into 3 equal groups. How many students are in each group?", "answer": "19", "solution": ["Share equally: 57 ÷ 3.", "3 × 10 = 30; 3 × 9 = 27.", "30 + 27 = 57, so the chunks 10 + 9 give 19.", "Answer: 19 students in each group."]},
-            {"level": "medium", "q": "200 pesos are shared equally among 5 friends. How many pesos does each friend get?", "answer": "40", "solution": ["Share equally: 200 ÷ 5.", "5 × 40 = 200.", "200 = 200, so the chunks 40 give 40.", "Answer: 40 pesos each."]},
-            {"level": "medium", "q": "A ribbon 168 cm long is cut into 4 equal pieces. How long is each piece, in cm?", "answer": "42", "solution": ["Share equally: 168 ÷ 4.", "4 × 40 = 160; 4 × 2 = 8.", "160 + 8 = 168, so the chunks 40 + 2 give 42.", "Answer: 42 cm each."]},
-            {"level": "medium", "q": "350 pencils are packed equally into 10 boxes. How many pencils are in each box?", "answer": "35", "solution": ["Share equally: 350 ÷ 10.", "10 × 30 = 300; 10 × 5 = 50.", "300 + 50 = 350, so the chunks 30 + 5 give 35.", "Answer: 35 pencils in each box."]},
-            // ---------- HARD (20 questions) ----------
-            {"level": "hard", "q": "1,764 ÷ 42 = ?", "answer": "42", "solution": ["Ask: 42 times what number is 1,764?", "42 × 40 = 1,680, and 1,764 − 1,680 = 84, which is 42 × 2.", "40 + 2 = 42."]},
-            {"level": "hard", "q": "3,625 ÷ 25 = ?", "answer": "145", "solution": ["Dividing by 25 is the same as multiplying by 4 and then dividing by 100.", "3,625 × 4 = 14,500.", "14,500 ÷ 100 = 145."]},
-            {"level": "hard", "q": "−72 ÷ 9 = ?", "answer": "−8", "solution": ["Divide the sizes first: 72 ÷ 9 = 8.", "A negative divided by a positive is negative.", "Answer: −8."]},
-            {"level": "hard", "q": "7,560 ÷ 18 = ?", "answer": "420", "solution": ["Split the divisor: 7,560 ÷ 18 = (7,560 ÷ 2) ÷ 9.", "7,560 ÷ 2 = 3,780.", "3,780 ÷ 9 = 420."]},
-            {"level": "hard", "q": "A factory packs 4,800 bottles into boxes of 24 bottles each. How many boxes does it fill?", "answer": "200", "solution": ["Boxes needed = 4,800 ÷ 24.", "24 × 100 = 2,400, so 24 × 200 = 4,800.", "The factory fills 200 boxes."]},
-            {"level": "hard", "q": "697 ÷ 41 = ?", "answer": "17", "solution": ["Ask: 41 times what number gives 697? Build it in chunks.", "41 × 10 = 410; 41 × 7 = 287.", "410 + 287 = 697, so the chunks 10 + 7 give 17."]},
-            {"level": "hard", "q": "200 ÷ 25 = ?", "answer": "8", "solution": ["Ask: 25 times what number gives 200? Build it in chunks.", "25 × 8 = 200.", "200 = 200, so the chunks 8 give 8."]},
-            {"level": "hard", "q": "476 ÷ 28 = ?", "answer": "17", "solution": ["Ask: 28 times what number gives 476? Build it in chunks.", "28 × 10 = 280; 28 × 7 = 196.", "280 + 196 = 476, so the chunks 10 + 7 give 17."]},
-            {"level": "hard", "q": "2,184 ÷ 21 = ?", "answer": "104", "solution": ["Ask: 21 times what number gives 2,184? Build it in chunks.", "21 × 100 = 2,100; 21 × 4 = 84.", "2,100 + 84 = 2,184, so the chunks 100 + 4 give 104."]},
-            {"level": "hard", "q": "2,964 ÷ 38 = ?", "answer": "78", "solution": ["Ask: 38 times what number gives 2,964? Build it in chunks.", "38 × 70 = 2,660; 38 × 8 = 304.", "2,660 + 304 = 2,964, so the chunks 70 + 8 give 78."]},
-            {"level": "hard", "q": "800 ÷ 20 = ?", "answer": "40", "solution": ["Ask: 20 times what number gives 800? Build it in chunks.", "20 × 40 = 800.", "800 = 800, so the chunks 40 give 40."]},
-            {"level": "hard", "q": "1,113 ÷ 21 = ?", "answer": "53", "solution": ["Ask: 21 times what number gives 1,113? Build it in chunks.", "21 × 50 = 1,050; 21 × 3 = 63.", "1,050 + 63 = 1,113, so the chunks 50 + 3 give 53."]},
-            {"level": "hard", "q": "−48 ÷ 8 = ?", "answer": "−6", "solution": ["Divide the sizes first: 48 ÷ 8 = 6.", "A negative divided by a positive is negative.", "Answer: −6."]},
-            {"level": "hard", "q": "−165 ÷ 11 = ?", "answer": "−15", "solution": ["Divide the sizes first: 165 ÷ 11 = 15.", "A negative divided by a positive is negative.", "Answer: −15."]},
-            {"level": "hard", "q": "−35 ÷ 7 = ?", "answer": "−5", "solution": ["Divide the sizes first: 35 ÷ 7 = 5.", "A negative divided by a positive is negative.", "Answer: −5."]},
-            {"level": "hard", "q": "6.4 ÷ 2 = ?", "answer": "3.2", "solution": ["Ignore the decimal point for now: 64 ÷ 2 = 32.", "6.4 has 1 decimal place, so the answer has 1 too.", "Answer: 3.2."]},
-            {"level": "hard", "q": "5.1 ÷ 3 = ?", "answer": "1.7", "solution": ["Ignore the decimal point for now: 51 ÷ 3 = 17.", "5.1 has 1 decimal place, so the answer has 1 too.", "Answer: 1.7."]},
-            {"level": "hard", "q": "A factory packs 1,764 bottles into boxes of 21. How many boxes does it fill?", "answer": "84", "solution": ["Divide the total by the amount in each group: 1,764 ÷ 21.", "21 × 80 = 1,680; 21 × 4 = 84.", "1,680 + 84 = 1,764, so the chunks 80 + 4 give 84.", "Answer: 84 boxes."]},
-            {"level": "hard", "q": "A school has 1,440 students. If each bus carries 36 students, how many buses are needed?", "answer": "40", "solution": ["Divide the total by the amount in each group: 1,440 ÷ 36.", "36 × 40 = 1,440.", "1,440 = 1,440, so the chunks 40 give 40.", "Answer: 40 buses."]},
-            {"level": "hard", "q": "A school has 2,088 students. If each bus carries 18 students, how many buses are needed?", "answer": "116", "solution": ["Divide the total by the amount in each group: 2,088 ÷ 18.", "18 × 100 = 1,800; 18 × 10 = 180; 18 × 6 = 108.", "1,800 + 180 + 108 = 2,088, so the chunks 100 + 10 + 6 give 116.", "Answer: 116 buses."]},
+          lesson:{"title": "How to convert binary to octal", "idea": "Octal is base 8, and 8 = 2 × 2 × 2, so every octal digit is exactly 3 bits. Group the bits in threes and convert each group.", "steps": ["Start from the right and split the bits into groups of 3.", "If the leftmost group is short, add zeros on its left to fill it.", "Turn each group of 3 bits into one octal digit (0 to 7) using the cheat sheet.", "Write the digits side by side."], "exTitle": "Example: convert 1101011 to octal", "exLines": ["Groups from the right: 1 | 101 | 011", "Pad the first group: 001 | 101 | 011", "001 = 1, 101 = 5, 011 = 3"], "exAnswer": "1101011 in binary = 153 in octal", "tip": "Always group from the right, never from the left.", "ref": "oct"},
+          resources:[],
+          focus:["grouping bits in 3s", "padding with leading zeros"] },
+        { key:"oct-bin", title:"Octal to Binary", sub:"Turn each digit into 3 bits", icon:"8→2", small:true,
+          game:{ cta:"Think you can master Octal to Binary? Answer all 20 questions, beat your best score, and tap Show solution whenever you're stuck!", questions:[
+            // ---------- EASY (7 questions) ----------
+            {"level": "easy", "q": "Convert this octal number to binary.", "num": "2", "from": 8, "to": 2, "base": 2, "answer": "10", "solution": ["Turn each octal digit into 3 bits: 2 = 010.", "Join the groups together: 010.", "Drop the zeros at the very front: 10."]},
+            {"level": "easy", "q": "Convert this octal number to binary.", "num": "3", "from": 8, "to": 2, "base": 2, "answer": "11", "solution": ["Turn each octal digit into 3 bits: 3 = 011.", "Join the groups together: 011.", "Drop the zeros at the very front: 11."]},
+            {"level": "easy", "q": "Convert this octal number to binary.", "num": "4", "from": 8, "to": 2, "base": 2, "answer": "100", "solution": ["Turn each octal digit into 3 bits: 4 = 100.", "Join the groups together: 100.", "There are no leading zeros to drop, so the answer is 100."]},
+            {"level": "easy", "q": "Convert this octal number to binary.", "num": "5", "from": 8, "to": 2, "base": 2, "answer": "101", "solution": ["Turn each octal digit into 3 bits: 5 = 101.", "Join the groups together: 101.", "There are no leading zeros to drop, so the answer is 101."]},
+            {"level": "easy", "q": "Convert this octal number to binary.", "num": "6", "from": 8, "to": 2, "base": 2, "answer": "110", "solution": ["Turn each octal digit into 3 bits: 6 = 110.", "Join the groups together: 110.", "There are no leading zeros to drop, so the answer is 110."]},
+            {"level": "easy", "q": "Convert this octal number to binary.", "num": "7", "from": 8, "to": 2, "base": 2, "answer": "111", "solution": ["Turn each octal digit into 3 bits: 7 = 111.", "Join the groups together: 111.", "There are no leading zeros to drop, so the answer is 111."]},
+            {"level": "easy", "q": "Convert this octal number to binary.", "num": "10", "from": 8, "to": 2, "base": 2, "answer": "1000", "solution": ["Turn each octal digit into 3 bits: 1 = 001, 0 = 000.", "Join the groups together: 001000.", "Drop the zeros at the very front: 1000."]},
+            // ---------- MEDIUM (7 questions) ----------
+            {"level": "medium", "q": "What is this octal number in binary?", "num": "12", "from": 8, "to": 2, "base": 2, "answer": "1010", "solution": ["Turn each octal digit into 3 bits: 1 = 001, 2 = 010.", "Join the groups together: 001010.", "Drop the zeros at the very front: 1010."]},
+            {"level": "medium", "q": "What is this octal number in binary?", "num": "17", "from": 8, "to": 2, "base": 2, "answer": "1111", "solution": ["Turn each octal digit into 3 bits: 1 = 001, 7 = 111.", "Join the groups together: 001111.", "Drop the zeros at the very front: 1111."]},
+            {"level": "medium", "q": "What is this octal number in binary?", "num": "25", "from": 8, "to": 2, "base": 2, "answer": "10101", "solution": ["Turn each octal digit into 3 bits: 2 = 010, 5 = 101.", "Join the groups together: 010101.", "Drop the zeros at the very front: 10101."]},
+            {"level": "medium", "q": "What is this octal number in binary?", "num": "36", "from": 8, "to": 2, "base": 2, "answer": "11110", "solution": ["Turn each octal digit into 3 bits: 3 = 011, 6 = 110.", "Join the groups together: 011110.", "Drop the zeros at the very front: 11110."]},
+            {"level": "medium", "q": "What is this octal number in binary?", "num": "45", "from": 8, "to": 2, "base": 2, "answer": "100101", "solution": ["Turn each octal digit into 3 bits: 4 = 100, 5 = 101.", "Join the groups together: 100101.", "There are no leading zeros to drop, so the answer is 100101."]},
+            {"level": "medium", "q": "What is this octal number in binary?", "num": "52", "from": 8, "to": 2, "base": 2, "answer": "101010", "solution": ["Turn each octal digit into 3 bits: 5 = 101, 2 = 010.", "Join the groups together: 101010.", "There are no leading zeros to drop, so the answer is 101010."]},
+            {"level": "medium", "q": "What is this octal number in binary?", "num": "64", "from": 8, "to": 2, "base": 2, "answer": "110100", "solution": ["Turn each octal digit into 3 bits: 6 = 110, 4 = 100.", "Join the groups together: 110100.", "There are no leading zeros to drop, so the answer is 110100."]},
+            // ---------- HARD (6 questions) ----------
+            {"level": "hard", "q": "Convert this octal number to binary.", "num": "77", "from": 8, "to": 2, "base": 2, "answer": "111111", "solution": ["Turn each octal digit into 3 bits: 7 = 111, 7 = 111.", "Join the groups together: 111111.", "There are no leading zeros to drop, so the answer is 111111."]},
+            {"level": "hard", "q": "Convert this octal number to binary.", "num": "100", "from": 8, "to": 2, "base": 2, "answer": "1000000", "solution": ["Turn each octal digit into 3 bits: 1 = 001, 0 = 000, 0 = 000.", "Join the groups together: 001000000.", "Drop the zeros at the very front: 1000000."]},
+            {"level": "hard", "q": "Convert this octal number to binary.", "num": "123", "from": 8, "to": 2, "base": 2, "answer": "1010011", "solution": ["Turn each octal digit into 3 bits: 1 = 001, 2 = 010, 3 = 011.", "Join the groups together: 001010011.", "Drop the zeros at the very front: 1010011."]},
+            {"level": "hard", "q": "Convert this octal number to binary.", "num": "275", "from": 8, "to": 2, "base": 2, "answer": "10111101", "solution": ["Turn each octal digit into 3 bits: 2 = 010, 7 = 111, 5 = 101.", "Join the groups together: 010111101.", "Drop the zeros at the very front: 10111101."]},
+            {"level": "hard", "q": "Convert this octal number to binary.", "num": "345", "from": 8, "to": 2, "base": 2, "answer": "11100101", "solution": ["Turn each octal digit into 3 bits: 3 = 011, 4 = 100, 5 = 101.", "Join the groups together: 011100101.", "Drop the zeros at the very front: 11100101."]},
+            {"level": "hard", "q": "Convert this octal number to binary.", "num": "377", "from": 8, "to": 2, "base": 2, "answer": "11111111", "solution": ["Turn each octal digit into 3 bits: 3 = 011, 7 = 111, 7 = 111.", "Join the groups together: 011111111.", "Drop the zeros at the very front: 11111111."]},
           ] },
-          resources:[
-            { type:'video', staticId:'video-division' }, // Easy / Medium / Hard videos are written in plain HTML in gen-portal.html
-          ], focus:[
-          'division facts', 'long division with and without remainders',
-          'divisibility rules for 2, 3, 5 and 10', 'division as the opposite of multiplication', 'simple division word problems'] }
-      ]}
+          lesson:{"title": "How to convert octal to binary", "idea": "This is the reverse of grouping. Turn every octal digit into its own 3-bit group, then join the groups together.", "steps": ["Look at each octal digit one at a time.", "Replace each digit with its 3-bit binary value (use the cheat sheet).", "Join all the groups together.", "Drop any zeros at the very front."], "exTitle": "Example: convert 345 to binary", "exLines": ["3 = 011, 4 = 100, 5 = 101", "Join them: 011100101", "Drop the leading zero: 11100101"], "exAnswer": "345 in octal = 11100101 in binary", "tip": "Keep all 3 bits for every digit except at the very front.", "ref": "oct"},
+          resources:[],
+          focus:["3-bit groups for octal digits", "dropping leading zeros"] }
+      ] },
+      { label: "Binary and hexadecimal", tone: 'c', topics: [
+        { key:"bin-hex", title:"Binary to Hexadecimal", sub:"Group the bits in fours", icon:"2→16", small:true,
+          game:{ cta:"Think you can master Binary to Hexadecimal? Answer all 20 questions, beat your best score, and tap Show solution whenever you're stuck!", questions:[
+            // ---------- EASY (7 questions) ----------
+            {"level": "easy", "q": "Convert this binary number to hexadecimal.", "num": "1001", "from": 2, "to": 16, "base": 16, "answer": "9", "solution": ["Split the bits into groups of 4, starting from the right: 1001.", "Convert each group to one digit: 1001 = 9.", "Write the digits side by side: 9."]},
+            {"level": "easy", "q": "Convert this binary number to hexadecimal.", "num": "1010", "from": 2, "to": 16, "base": 16, "answer": "A", "solution": ["Split the bits into groups of 4, starting from the right: 1010.", "Convert each group to one digit: 1010 = A (10).", "Write the digits side by side: A."]},
+            {"level": "easy", "q": "Convert this binary number to hexadecimal.", "num": "1011", "from": 2, "to": 16, "base": 16, "answer": "B", "solution": ["Split the bits into groups of 4, starting from the right: 1011.", "Convert each group to one digit: 1011 = B (11).", "Write the digits side by side: B."]},
+            {"level": "easy", "q": "Convert this binary number to hexadecimal.", "num": "1100", "from": 2, "to": 16, "base": 16, "answer": "C", "solution": ["Split the bits into groups of 4, starting from the right: 1100.", "Convert each group to one digit: 1100 = C (12).", "Write the digits side by side: C."]},
+            {"level": "easy", "q": "Convert this binary number to hexadecimal.", "num": "1101", "from": 2, "to": 16, "base": 16, "answer": "D", "solution": ["Split the bits into groups of 4, starting from the right: 1101.", "Convert each group to one digit: 1101 = D (13).", "Write the digits side by side: D."]},
+            {"level": "easy", "q": "Convert this binary number to hexadecimal.", "num": "1110", "from": 2, "to": 16, "base": 16, "answer": "E", "solution": ["Split the bits into groups of 4, starting from the right: 1110.", "Convert each group to one digit: 1110 = E (14).", "Write the digits side by side: E."]},
+            {"level": "easy", "q": "Convert this binary number to hexadecimal.", "num": "1111", "from": 2, "to": 16, "base": 16, "answer": "F", "solution": ["Split the bits into groups of 4, starting from the right: 1111.", "Convert each group to one digit: 1111 = F (15).", "Write the digits side by side: F."]},
+            // ---------- MEDIUM (7 questions) ----------
+            {"level": "medium", "q": "What is this binary number in hexadecimal?", "num": "10000", "from": 2, "to": 16, "base": 16, "answer": "10", "solution": ["Split the bits into groups of 4, starting from the right (add 3 zeros on the left to fill the first group): 0001 | 0000.", "Convert each group to one digit: 0001 = 1, 0000 = 0.", "Write the digits side by side: 10."]},
+            {"level": "medium", "q": "What is this binary number in hexadecimal?", "num": "11010", "from": 2, "to": 16, "base": 16, "answer": "1A", "solution": ["Split the bits into groups of 4, starting from the right (add 3 zeros on the left to fill the first group): 0001 | 1010.", "Convert each group to one digit: 0001 = 1, 1010 = A (10).", "Write the digits side by side: 1A."]},
+            {"level": "medium", "q": "What is this binary number in hexadecimal?", "num": "101101", "from": 2, "to": 16, "base": 16, "answer": "2D", "solution": ["Split the bits into groups of 4, starting from the right (add 2 zeros on the left to fill the first group): 0010 | 1101.", "Convert each group to one digit: 0010 = 2, 1101 = D (13).", "Write the digits side by side: 2D."]},
+            {"level": "medium", "q": "What is this binary number in hexadecimal?", "num": "111111", "from": 2, "to": 16, "base": 16, "answer": "3F", "solution": ["Split the bits into groups of 4, starting from the right (add 2 zeros on the left to fill the first group): 0011 | 1111.", "Convert each group to one digit: 0011 = 3, 1111 = F (15).", "Write the digits side by side: 3F."]},
+            {"level": "medium", "q": "What is this binary number in hexadecimal?", "num": "100110", "from": 2, "to": 16, "base": 16, "answer": "26", "solution": ["Split the bits into groups of 4, starting from the right (add 2 zeros on the left to fill the first group): 0010 | 0110.", "Convert each group to one digit: 0010 = 2, 0110 = 6.", "Write the digits side by side: 26."]},
+            {"level": "medium", "q": "What is this binary number in hexadecimal?", "num": "1011100", "from": 2, "to": 16, "base": 16, "answer": "5C", "solution": ["Split the bits into groups of 4, starting from the right (add 1 zero on the left to fill the first group): 0101 | 1100.", "Convert each group to one digit: 0101 = 5, 1100 = C (12).", "Write the digits side by side: 5C."]},
+            {"level": "medium", "q": "What is this binary number in hexadecimal?", "num": "1100111", "from": 2, "to": 16, "base": 16, "answer": "67", "solution": ["Split the bits into groups of 4, starting from the right (add 1 zero on the left to fill the first group): 0110 | 0111.", "Convert each group to one digit: 0110 = 6, 0111 = 7.", "Write the digits side by side: 67."]},
+            // ---------- HARD (6 questions) ----------
+            {"level": "hard", "q": "Convert this binary number to hexadecimal.", "num": "10101010", "from": 2, "to": 16, "base": 16, "answer": "AA", "solution": ["Split the bits into groups of 4, starting from the right: 1010 | 1010.", "Convert each group to one digit: 1010 = A (10), 1010 = A (10).", "Write the digits side by side: AA."]},
+            {"level": "hard", "q": "Convert this binary number to hexadecimal.", "num": "11110000", "from": 2, "to": 16, "base": 16, "answer": "F0", "solution": ["Split the bits into groups of 4, starting from the right: 1111 | 0000.", "Convert each group to one digit: 1111 = F (15), 0000 = 0.", "Write the digits side by side: F0."]},
+            {"level": "hard", "q": "Convert this binary number to hexadecimal.", "num": "11111111", "from": 2, "to": 16, "base": 16, "answer": "FF", "solution": ["Split the bits into groups of 4, starting from the right: 1111 | 1111.", "Convert each group to one digit: 1111 = F (15), 1111 = F (15).", "Write the digits side by side: FF."]},
+            {"level": "hard", "q": "Convert this binary number to hexadecimal.", "num": "10111110", "from": 2, "to": 16, "base": 16, "answer": "BE", "solution": ["Split the bits into groups of 4, starting from the right: 1011 | 1110.", "Convert each group to one digit: 1011 = B (11), 1110 = E (14).", "Write the digits side by side: BE."]},
+            {"level": "hard", "q": "Convert this binary number to hexadecimal.", "num": "1101001011", "from": 2, "to": 16, "base": 16, "answer": "34B", "solution": ["Split the bits into groups of 4, starting from the right (add 2 zeros on the left to fill the first group): 0011 | 0100 | 1011.", "Convert each group to one digit: 0011 = 3, 0100 = 4, 1011 = B (11).", "Write the digits side by side: 34B."]},
+            {"level": "hard", "q": "Convert this binary number to hexadecimal.", "num": "111100001010", "from": 2, "to": 16, "base": 16, "answer": "F0A", "solution": ["Split the bits into groups of 4, starting from the right: 1111 | 0000 | 1010.", "Convert each group to one digit: 1111 = F (15), 0000 = 0, 1010 = A (10).", "Write the digits side by side: F0A."]},
+          ] },
+          lesson:{"title": "How to convert binary to hexadecimal", "idea": "Hexadecimal is base 16, and 16 = 2 × 2 × 2 × 2, so every hex digit is exactly 4 bits. Values 10 to 15 are written as the letters A to F.", "steps": ["Start from the right and split the bits into groups of 4.", "If the leftmost group is short, add zeros on its left to fill it.", "Turn each group into one hex digit: 0 to 9, then A = 10, B = 11, C = 12, D = 13, E = 14, F = 15.", "Write the digits side by side."], "exTitle": "Example: convert 101111010 to hexadecimal", "exLines": ["Groups from the right: 1 | 0111 | 1010", "Pad the first group: 0001 | 0111 | 1010", "0001 = 1, 0111 = 7, 1010 = A"], "exAnswer": "101111010 in binary = 17A in hexadecimal", "tip": "Learn 1010 = A, 1011 = B, 1100 = C, 1101 = D, 1110 = E, 1111 = F.", "ref": "hex"},
+          resources:[],
+          focus:["grouping bits in 4s", "hex digits A to F"] },
+        { key:"hex-bin", title:"Hexadecimal to Binary", sub:"Turn each digit into 4 bits", icon:"16→2", small:true,
+          game:{ cta:"Think you can master Hexadecimal to Binary? Answer all 20 questions, beat your best score, and tap Show solution whenever you're stuck!", questions:[
+            // ---------- EASY (7 questions) ----------
+            {"level": "easy", "q": "Convert this hexadecimal number to binary.", "num": "3", "from": 16, "to": 2, "base": 2, "answer": "11", "solution": ["Turn each hexadecimal digit into 4 bits: 3 = 0011.", "Join the groups together: 0011.", "Drop the zeros at the very front: 11."]},
+            {"level": "easy", "q": "Convert this hexadecimal number to binary.", "num": "5", "from": 16, "to": 2, "base": 2, "answer": "101", "solution": ["Turn each hexadecimal digit into 4 bits: 5 = 0101.", "Join the groups together: 0101.", "Drop the zeros at the very front: 101."]},
+            {"level": "easy", "q": "Convert this hexadecimal number to binary.", "num": "9", "from": 16, "to": 2, "base": 2, "answer": "1001", "solution": ["Turn each hexadecimal digit into 4 bits: 9 = 1001.", "Join the groups together: 1001.", "There are no leading zeros to drop, so the answer is 1001."]},
+            {"level": "easy", "q": "Convert this hexadecimal number to binary.", "num": "A", "from": 16, "to": 2, "base": 2, "answer": "1010", "solution": ["Turn each hexadecimal digit into 4 bits: A (10) = 1010.", "Join the groups together: 1010.", "There are no leading zeros to drop, so the answer is 1010."]},
+            {"level": "easy", "q": "Convert this hexadecimal number to binary.", "num": "B", "from": 16, "to": 2, "base": 2, "answer": "1011", "solution": ["Turn each hexadecimal digit into 4 bits: B (11) = 1011.", "Join the groups together: 1011.", "There are no leading zeros to drop, so the answer is 1011."]},
+            {"level": "easy", "q": "Convert this hexadecimal number to binary.", "num": "D", "from": 16, "to": 2, "base": 2, "answer": "1101", "solution": ["Turn each hexadecimal digit into 4 bits: D (13) = 1101.", "Join the groups together: 1101.", "There are no leading zeros to drop, so the answer is 1101."]},
+            {"level": "easy", "q": "Convert this hexadecimal number to binary.", "num": "F", "from": 16, "to": 2, "base": 2, "answer": "1111", "solution": ["Turn each hexadecimal digit into 4 bits: F (15) = 1111.", "Join the groups together: 1111.", "There are no leading zeros to drop, so the answer is 1111."]},
+            // ---------- MEDIUM (7 questions) ----------
+            {"level": "medium", "q": "What is this hexadecimal number in binary?", "num": "10", "from": 16, "to": 2, "base": 2, "answer": "10000", "solution": ["Turn each hexadecimal digit into 4 bits: 1 = 0001, 0 = 0000.", "Join the groups together: 00010000.", "Drop the zeros at the very front: 10000."]},
+            {"level": "medium", "q": "What is this hexadecimal number in binary?", "num": "1F", "from": 16, "to": 2, "base": 2, "answer": "11111", "solution": ["Turn each hexadecimal digit into 4 bits: 1 = 0001, F (15) = 1111.", "Join the groups together: 00011111.", "Drop the zeros at the very front: 11111."]},
+            {"level": "medium", "q": "What is this hexadecimal number in binary?", "num": "2A", "from": 16, "to": 2, "base": 2, "answer": "101010", "solution": ["Turn each hexadecimal digit into 4 bits: 2 = 0010, A (10) = 1010.", "Join the groups together: 00101010.", "Drop the zeros at the very front: 101010."]},
+            {"level": "medium", "q": "What is this hexadecimal number in binary?", "num": "3C", "from": 16, "to": 2, "base": 2, "answer": "111100", "solution": ["Turn each hexadecimal digit into 4 bits: 3 = 0011, C (12) = 1100.", "Join the groups together: 00111100.", "Drop the zeros at the very front: 111100."]},
+            {"level": "medium", "q": "What is this hexadecimal number in binary?", "num": "4B", "from": 16, "to": 2, "base": 2, "answer": "1001011", "solution": ["Turn each hexadecimal digit into 4 bits: 4 = 0100, B (11) = 1011.", "Join the groups together: 01001011.", "Drop the zeros at the very front: 1001011."]},
+            {"level": "medium", "q": "What is this hexadecimal number in binary?", "num": "7E", "from": 16, "to": 2, "base": 2, "answer": "1111110", "solution": ["Turn each hexadecimal digit into 4 bits: 7 = 0111, E (14) = 1110.", "Join the groups together: 01111110.", "Drop the zeros at the very front: 1111110."]},
+            {"level": "medium", "q": "What is this hexadecimal number in binary?", "num": "A5", "from": 16, "to": 2, "base": 2, "answer": "10100101", "solution": ["Turn each hexadecimal digit into 4 bits: A (10) = 1010, 5 = 0101.", "Join the groups together: 10100101.", "There are no leading zeros to drop, so the answer is 10100101."]},
+            // ---------- HARD (6 questions) ----------
+            {"level": "hard", "q": "Convert this hexadecimal number to binary.", "num": "C3", "from": 16, "to": 2, "base": 2, "answer": "11000011", "solution": ["Turn each hexadecimal digit into 4 bits: C (12) = 1100, 3 = 0011.", "Join the groups together: 11000011.", "There are no leading zeros to drop, so the answer is 11000011."]},
+            {"level": "hard", "q": "Convert this hexadecimal number to binary.", "num": "FF", "from": 16, "to": 2, "base": 2, "answer": "11111111", "solution": ["Turn each hexadecimal digit into 4 bits: F (15) = 1111, F (15) = 1111.", "Join the groups together: 11111111.", "There are no leading zeros to drop, so the answer is 11111111."]},
+            {"level": "hard", "q": "Convert this hexadecimal number to binary.", "num": "1A3", "from": 16, "to": 2, "base": 2, "answer": "110100011", "solution": ["Turn each hexadecimal digit into 4 bits: 1 = 0001, A (10) = 1010, 3 = 0011.", "Join the groups together: 000110100011.", "Drop the zeros at the very front: 110100011."]},
+            {"level": "hard", "q": "Convert this hexadecimal number to binary.", "num": "2BC", "from": 16, "to": 2, "base": 2, "answer": "1010111100", "solution": ["Turn each hexadecimal digit into 4 bits: 2 = 0010, B (11) = 1011, C (12) = 1100.", "Join the groups together: 001010111100.", "Drop the zeros at the very front: 1010111100."]},
+            {"level": "hard", "q": "Convert this hexadecimal number to binary.", "num": "ABC", "from": 16, "to": 2, "base": 2, "answer": "101010111100", "solution": ["Turn each hexadecimal digit into 4 bits: A (10) = 1010, B (11) = 1011, C (12) = 1100.", "Join the groups together: 101010111100.", "There are no leading zeros to drop, so the answer is 101010111100."]},
+            {"level": "hard", "q": "Convert this hexadecimal number to binary.", "num": "F0F", "from": 16, "to": 2, "base": 2, "answer": "111100001111", "solution": ["Turn each hexadecimal digit into 4 bits: F (15) = 1111, 0 = 0000, F (15) = 1111.", "Join the groups together: 111100001111.", "There are no leading zeros to drop, so the answer is 111100001111."]},
+          ] },
+          lesson:{"title": "How to convert hexadecimal to binary", "idea": "Replace every hex digit with its 4-bit binary value, then join the groups together. It is the reverse of grouping.", "steps": ["Look at each hex digit one at a time.", "Replace it with 4 bits (use the cheat sheet, for example A = 1010 and F = 1111).", "Join all the groups together.", "Drop any zeros at the very front."], "exTitle": "Example: convert 2F to binary", "exLines": ["2 = 0010, F = 1111", "Join them: 00101111", "Drop the leading zeros: 101111"], "exAnswer": "2F in hexadecimal = 101111 in binary", "tip": "Keep all 4 bits for every digit except at the very front.", "ref": "hex"},
+          resources:[],
+          focus:["4-bit groups for hex digits", "dropping leading zeros"] }
+      ] }
     ]
   }
 };
 
-// Level card clicked: show the topic picker and remember the level for this student.
+/* ================= ARITHMETIC SECTIONS: Addition, Subtraction, Multiplication, Division =================
+   Every section holds the same 6 conversion types (binary to decimal, decimal to binary, binary to octal,
+   octal to binary, binary to hexadecimal, hexadecimal to binary). In each topic the student does the
+   operation on two numbers written in the "from" base and gives the result in the "to" base.
+   Questions are built from a fixed seed, so they are the same on every visit, and every answer is computed
+   by the program (never typed by hand). Each topic has 60 questions: 20 easy, 20 medium and 20 hard. The student picks a difficulty and plays its 20. */
+const BASE_WORD = { 2:'binary', 8:'octal', 10:'decimal', 16:'hexadecimal' };
+const CONV_GROUPS = [
+  { label:'Binary and decimal', tone:'a', items:[
+    { k:'bin-dec', from:2,  to:10, title:'Binary to Decimal',     ref:'place' },
+    { k:'dec-bin', from:10, to:2,  title:'Decimal to Binary',     ref:'place' } ] },
+  { label:'Binary and octal', tone:'b', items:[
+    { k:'bin-oct', from:2,  to:8,  title:'Binary to Octal',       ref:'oct' },
+    { k:'oct-bin', from:8,  to:2,  title:'Octal to Binary',       ref:'oct' } ] },
+  { label:'Binary and hexadecimal', tone:'c', items:[
+    { k:'bin-hex', from:2,  to:16, title:'Binary to Hexadecimal', ref:'hex' },
+    { k:'hex-bin', from:16, to:2,  title:'Hexadecimal to Binary', ref:'hex' } ] }
+];
+const ARITH = {
+  add:{ name:'Addition',       sym:'+', show:'+',      tone:'a', result:'sum',        verb:'Add',
+        desc:'Add two numbers, then write the sum in another number system.',
+        step:'Add the two decimal numbers.',
+        idea:'Adding works the same in every number system. The easy route is to change both numbers to decimal, add them, and then write the total in the base the question asks for.',
+        tip:'Binary carry rule: 1 + 1 = 10 (write 0 and carry 1).', ex:[13, 6] },
+  sub:{ name:'Subtraction',    sym:'\u2212', show:'\u2212', tone:'b', result:'difference', verb:'Subtract',
+        desc:'Subtract one number from another, then change the answer\u2019s base.',
+        step:'Subtract the second decimal number from the first.',
+        idea:'Subtract the second number from the first. The easy route is to change both numbers to decimal, subtract, and then write the difference in the base the question asks for.',
+        tip:'Binary borrow rule: 10 \u2212 1 = 1 (borrow from the next place).', ex:[25, 9] },
+  mul:{ name:'Multiplication', sym:'\u00D7', show:'\u00D7', tone:'c', result:'product',    verb:'Multiply',
+        desc:'Multiply two numbers, then write the product in another base.',
+        step:'Multiply the two decimal numbers.',
+        idea:'Multiplying works the same in every number system. Change both numbers to decimal, multiply them, and then write the product in the base the question asks for.',
+        tip:'In binary, multiplying by 2 just shifts every bit one place to the left.', ex:[6, 5] },
+  div:{ name:'Division',       sym:'\u00F7', show:'\u00F7', tone:'d', result:'quotient',   verb:'Divide',
+        desc:'Divide one number by another (exact answers), then change the base.',
+        step:'Divide the first decimal number by the second.',
+        idea:'Divide the first number by the second. Every question divides exactly, with no remainder. Change both numbers to decimal, divide, and then write the quotient in the base the question asks for.',
+        tip:'In binary, dividing by 2 just shifts every bit one place to the right.', ex:[28, 4] }
+};
+const ARITH_ORDER = ['add','sub','mul','div'];
+const FROM_METHOD = {
+  2:'use place values (1, 2, 4, 8, 16 and so on) for every bit that is 1, then add them',
+  8:'multiply each digit by its power of 8 (1, 8, 64 and so on), then add',
+  10:'both numbers are already decimal, so keep them as they are',
+  16:'multiply each digit by its power of 16 (1, 16, 256 and so on), then add (A = 10 up to F = 15)'
+};
+const TO_METHOD = {
+  10:'the result is already decimal, so you are done',
+  2:'divide by 2 again and again, then read the remainders from the last to the first',
+  8:'write it in binary, group the bits in 3s from the right, and turn each group into one octal digit',
+  16:'write it in binary, group the bits in 4s from the right, and turn each group into one hex digit (A = 10 up to F = 15)'
+};
+
+// small seeded random number generator (same questions on every visit)
+function seededRng(str){
+  let h = 1779033703 ^ str.length;
+  for(let i = 0; i < str.length; i++){ h = Math.imul(h ^ str.charCodeAt(i), 3432918353); h = (h << 13) | (h >>> 19); }
+  let a = h >>> 0;
+  return function(){
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function arFmt(n, base){ return n.toString(base).toUpperCase(); }
+
+// One operand pair for an operation and difficulty: returns [first, second, result] in decimal.
+function arithPair(op, diff, r){
+  const R = (lo, hi) => lo + Math.floor(r() * (hi - lo + 1));
+  let a, b;
+  if(op === 'add'){
+    const [lo, hi] = diff === 'easy' ? [1, 9] : diff === 'medium' ? [8, 31] : [32, 127];
+    a = R(lo, hi); b = R(lo, hi); return [a, b, a + b];
+  }
+  if(op === 'sub'){
+    if(diff === 'easy'){ a = R(4, 15); b = R(1, a - 1); }
+    else if(diff === 'medium'){ a = R(16, 63); b = R(4, a - 1); }
+    else { a = R(64, 255); b = R(16, a - 8); }
+    return [a, b, a - b];
+  }
+  if(op === 'mul'){
+    if(diff === 'easy'){ a = R(2, 8); b = R(2, 8); }
+    else if(diff === 'medium'){ a = R(5, 15); b = R(2, 7); }
+    else { a = R(10, 31); b = R(5, 15); }
+    return [a, b, a * b];
+  }
+  let d, k;                                   // division: pick divisor and quotient, so it always divides exactly
+  if(diff === 'easy'){ d = R(2, 6); k = R(2, 8); }
+  else if(diff === 'medium'){ d = R(2, 9); k = R(4, 15); }
+  else { d = R(3, 15); k = R(6, 31); }
+  return [d * k, d, k];
+}
+
+function arithSolution(op, a, b, res, from, to){
+  const O = ARITH[op];
+  const A = arFmt(a, from), B = arFmt(b, from), R = arFmt(res, to);
+  const s1 = from === 10
+    ? `The numbers are already in decimal: ${a} and ${b}.`
+    : `Convert both ${BASE_WORD[from]} numbers to decimal: ${A} = ${a} and ${B} = ${b}.`;
+  const s2 = `${O.verb} in decimal: ${a} ${O.show} ${b} = ${res}.`;
+  let s3;
+  if(to === 10){
+    s3 = `The answer is already in decimal, so the final answer is ${res}.`;
+  } else if(to === 2){
+    s3 = `Convert ${res} to binary (divide by 2 and read the remainders from the last to the first): ${res} = ${R}.`;
+  } else {
+    const size = to === 8 ? 3 : 4, bin = res.toString(2);
+    const padded = bin.padStart(Math.ceil(bin.length / size) * size, '0');
+    const groups = padded.match(new RegExp('.{' + size + '}', 'g'));
+    const digits = groups.map(g => arFmt(parseInt(g, 2), to));
+    s3 = `Write ${res} in binary: ${bin}. Group the bits in ${size}s from the right: ${groups.join(' | ')}. Each group is one ${BASE_WORD[to]} digit: ${digits.join(' ')}, so the answer is ${R}.`;
+  }
+  return [s1, s2, s3];
+}
+
+const DIFF_NAME = { easy:'Easy', medium:'Medium', hard:'Hard' };
+
+// Binary arithmetic: 20 questions of ONE difficulty. Both numbers are binary and so is the answer.
+function buildArithTopic(op, diff){
+  const O = ARITH[op];
+  const rnd = seededRng(op + '|bin|' + diff);
+  const rows = [], seen = new Set();
+  let guard = 0;
+  while(rows.length < 20 && guard++ < 5000){
+    const [a, b, res] = arithPair(op, diff, rnd);
+    const key = a + ',' + b;
+    if(seen.has(key) || res < 1 || (op !== 'div' && a === b)) continue;
+    seen.add(key); rows.push([a, b, res]);
+  }
+  rows.sort((x, y) => x[2] - y[2]);          // easiest first
+  const questions = rows.map(([a, b, res]) => {
+    const q = diff === 'easy'
+      ? `${O.verb} ${op === 'sub' ? 'these binary numbers (first minus second)' : op === 'div' ? 'the first binary number by the second' : 'these binary numbers'}. Write the ${O.result} in binary.`
+      : diff === 'medium'
+      ? `What is the ${O.result} of these binary numbers? Give it in binary.`
+      : `Work out the ${O.result} of these binary numbers and write it in binary.`;
+    return {
+      level: diff, q, num: `${arFmt(a, 2)} ${O.show} ${arFmt(b, 2)}`, expr: true,
+      from: 2, to: 2, base: 2, answer: arFmt(res, 2), solution: arithSolution(op, a, b, res, 2, 2)
+    };
+  });
+
+  const [ea, eb] = O.ex, eres = op === 'add' ? ea + eb : op === 'sub' ? ea - eb : op === 'mul' ? ea * eb : ea / eb;
+  const exExpr = `${arFmt(ea, 2)} ${O.show} ${arFmt(eb, 2)}`;
+  const title = 'Binary ' + O.name;
+  return {
+    key: op + '_' + diff, ck: op + '-bin', diff,
+    title,
+    sub: `${O.verb} binary numbers, answer in binary`,
+    icon: O.sym,
+    game: { cta: `Think you can master ${title} (${DIFF_NAME[diff]})? Answer all 20 questions, beat your best score, and tap Show solution whenever you're stuck!`, questions },
+    lesson: {
+      title: `How to ${O.verb.toLowerCase()} binary numbers`,
+      idea: O.idea,
+      steps: [
+        from10steps(2),
+        O.step,
+        `Convert the result back to binary: ${TO_METHOD[2]}.`,
+        'Check your work: change your answer back to decimal and make sure it matches the result.'
+      ],
+      exTitle: `Example: ${exExpr} (binary)`,
+      exLines: arithSolution(op, ea, eb, eres, 2, 2),
+      exAnswer: `${exExpr} = ${arFmt(eres, 2)} in binary`,
+      tip: O.tip,
+      ref: 'place'
+    },
+    resources: [],
+    focus: [`${O.name.toLowerCase()} in binary`, `${DIFF_NAME[diff]} questions`]
+  };
+}
+
+/* ----- Binary conversion: 20 questions of ONE difficulty, computed by the program ----- */
+const CONV_RANGE = {
+  'bin-dec': { easy:[2, 31],   medium:[32, 127],   hard:[128, 1023] },
+  'dec-bin': { easy:[2, 31],   medium:[32, 127],   hard:[128, 1023] },
+  'bin-oct': { easy:[8, 63],   medium:[64, 511],   hard:[512, 4095] },
+  'oct-bin': { easy:[8, 63],   medium:[64, 511],   hard:[512, 4095] },
+  'bin-hex': { easy:[16, 255], medium:[256, 4095], hard:[4096, 65535] },
+  'hex-bin': { easy:[16, 255], medium:[256, 4095], hard:[4096, 65535] }
+};
+function convDigitLabel(d, base){ return (base === 16 && d >= 10) ? `${d.toString(16).toUpperCase()} (${d})` : String(d); }
+function convSolution(item, n){
+  const bin = n.toString(2), k = item.k;
+  if(k === 'bin-dec'){
+    const pv = bin.split('').map((_, i) => 2 ** (bin.length - 1 - i));
+    const ones = pv.filter((_, i) => bin[i] === '1');
+    return [
+      `Write the place values above the bits, from left to right: ${pv.join(', ')}.`,
+      `Keep the place values that sit above a 1: ${ones.join(' + ')}.`,
+      ones.length > 1 ? `Add them up: ${ones.join(' + ')} = ${n}.` : `Only one place value is left, so the answer is ${n}.`
+    ];
+  }
+  if(k === 'dec-bin'){
+    const lines = []; let x = n;
+    while(x > 0){ lines.push(`${x} \u00F7 2 = ${Math.floor(x / 2)} remainder ${x % 2}`); x = Math.floor(x / 2); }
+    return [
+      `Divide by 2 again and again, and write down each remainder: ${lines.join('; ')}.`,
+      `Read the remainders from the last one up to the first one: ${bin}.`,
+      `So ${n} in binary is ${bin}.`
+    ];
+  }
+  if(k === 'bin-oct' || k === 'bin-hex'){
+    const size = k === 'bin-oct' ? 3 : 4, to = item.to;
+    const pad = (size - bin.length % size) % size;
+    const padded = '0'.repeat(pad) + bin, groups = padded.match(new RegExp('.{' + size + '}', 'g'));
+    const ans = n.toString(to).toUpperCase();
+    return [
+      `Split the bits into groups of ${size}, starting from the right${pad ? ` (add ${pad} zero${pad > 1 ? 's' : ''} on the left to fill the first group)` : ''}: ${groups.join(' | ')}.`,
+      `Convert each group to one digit: ${groups.map(g => `${g} = ${convDigitLabel(parseInt(g, 2), to)}`).join(', ')}.`,
+      `Write the digits side by side: ${ans}.`
+    ];
+  }
+  const from = item.from, size = from === 8 ? 3 : 4, str = n.toString(from).toUpperCase();
+  const groups = str.split('').map(ch => parseInt(ch, 16).toString(2).padStart(size, '0'));
+  const joined = groups.join('');
+  return [
+    `Turn each ${BASE_WORD[from]} digit into ${size} bits: ${str.split('').map((ch, i) => `${convDigitLabel(parseInt(ch, 16), from)} = ${groups[i]}`).join(', ')}.`,
+    `Join the groups together: ${joined}.`,
+    joined === bin ? `There are no leading zeros to drop, so the answer is ${bin}.` : `Drop the zeros at the very front: ${bin}.`
+  ];
+}
+const CONV_SRC = {};
+BEGINNER_SRC.beginner.groups.forEach(g => g.topics.forEach(t => { CONV_SRC[t.key] = t; }));
+const CONV_ITEMS = {};
+CONV_GROUPS.forEach(g => g.items.forEach(it => { CONV_ITEMS[it.k] = it; }));
+
+function buildConvTopic(k, diff){
+  const item = CONV_ITEMS[k], src = CONV_SRC[k];
+  const rnd = seededRng('conv|' + k + '|' + diff);
+  const [lo, hi] = CONV_RANGE[k][diff];
+  const nums = new Set();
+  let guard = 0;
+  while(nums.size < 20 && guard++ < 5000) nums.add(lo + Math.floor(rnd() * (hi - lo + 1)));
+  const f = BASE_WORD[item.from], g = BASE_WORD[item.to];
+  const questions = [...nums].sort((x, y) => x - y).map(n => ({
+    level: diff,
+    q: diff === 'easy' ? `Convert this ${f} number to ${g}.` : diff === 'medium' ? `What is this ${f} number in ${g}?` : `Work out this ${f} number in ${g}.`,
+    num: arFmt(n, item.from), from: item.from, to: item.to, base: item.to, answer: arFmt(n, item.to),
+    solution: convSolution(item, n)
+  }));
+  return Object.assign({}, src, {
+    key: k + '_' + diff, ck: k, diff,
+    game: { cta: `Think you can master ${item.title} (${DIFF_NAME[diff]})? Answer all 20 questions, beat your best score, and tap Show solution whenever you're stuck!`, questions }
+  });
+}
+function from10steps(from){
+  return from === 10 ? 'Both numbers are already decimal, so keep them as they are.'
+                     : `Convert each ${BASE_WORD[from]} number to decimal: ${FROM_METHOD[from]}.`;
+}
+
+// Every topic ("family") holds three levels: Easy, Medium and Hard, 20 questions each.
+const DIFFS = ['easy', 'medium', 'hard'];
+const SECTION_ORDER = ['arith', 'conv'];
+function buildArithFamily(op){
+  const O = ARITH[op];
+  return { key: op, title: 'Binary ' + O.name, sub: `${O.verb} binary numbers, answer in binary`, icon: O.sym,
+           topics: DIFFS.map(d => buildArithTopic(op, d)) };
+}
+function buildConvFamily(k){
+  const src = CONV_SRC[k], item = CONV_ITEMS[k];
+  return { key: k, title: item.title, sub: src.sub, icon: src.icon, small: true,
+           topics: DIFFS.map(d => buildConvTopic(k, d)) };
+}
+const LEVELS = {
+  arith: {
+    name: 'Binary Arithmetic', short: 'Arithmetic', sym: '\u00B1', tone: 'a',
+    desc: 'Add, subtract, multiply and divide binary numbers.',
+    intro: 'Four topics. Open one to pick Easy, Medium or Hard.',
+    groups: [
+      { label: 'Addition and subtraction',   tone: 'a', ops: ['add', 'sub'] },
+      { label: 'Multiplication and division', tone: 'b', ops: ['mul', 'div'] }
+    ].map(g => ({ label: g.label, tone: g.tone, families: g.ops.map(buildArithFamily) }))
+  },
+  conv: {
+    name: 'Binary Conversion', short: 'Conversion', sym: '\u21C4', tone: 'c',
+    desc: 'Change numbers between binary, decimal, octal and hexadecimal.',
+    intro: 'Six topics. Open one to pick Easy, Medium or Hard.',
+    groups: CONV_GROUPS.map(g => ({ label: g.label, tone: g.tone, families: g.items.map(it => buildConvFamily(it.k)) }))
+  }
+};
+function familiesOf(levelKey){ return LEVELS[levelKey].groups.flatMap(g => g.families); }
+function allTopicsOf(levelKey){ return familiesOf(levelKey).flatMap(f => f.topics); }
+function familyOf(levelKey, topicKey){ return familiesOf(levelKey).find(f => f.topics.some(t => t.key === topicKey)); }
+
+// The two section cards on the "Choose a section" screen.
+function renderSections(){
+  const el = document.getElementById('sectionGrid');
+  if(!el) return;
+  el.innerHTML = SECTION_ORDER.map(op => {
+    const L = LEVELS[op];
+    const fams = familiesOf(op);
+    const qs = allTopicsOf(op).reduce((n, t) => n + t.game.questions.length, 0);
+    return `
+      <button class="sec-card sec-${L.tone}" onclick="chooseLevel('${op}')">
+        <span class="sec-symbol" aria-hidden="true">${L.sym}</span>
+        <span class="sec-body">
+          <span class="sec-name">${L.name}</span>
+          <span class="sec-desc">${L.desc}</span>
+          <span class="sec-meta">${fams.length} topics \u00B7 ${qs} questions</span>
+        </span>
+        <span class="topic-arrow">\u2192</span>
+      </button>`;
+  }).join('');
+}
+renderSections();
+
+function openSections(){
+  showWizardStep('sections');
+  window.scrollTo({ top:0, behavior:'smooth' });
+}
+
+// Section card clicked: show its topics and remember the section for this student.
 function chooseLevel(levelKey){
   const level = LEVELS[levelKey];
   if(!level) return;
@@ -951,42 +1218,94 @@ function chooseLevel(levelKey){
   showWizardStep('topics');
 }
 
-// Builds the organized grid of topic buttons, one labelled group at a time.
+// Topic cards, grouped under labels (Binary and decimal, Binary and octal, ...).
 function renderTopics(levelKey){
   const level = LEVELS[levelKey];
   document.getElementById('topicsHeading').textContent = level.name;
+  const intro = document.getElementById('topicsIntro'); if(intro && level.intro) intro.textContent = level.intro;
   document.getElementById('topicGroups').innerHTML = level.groups.map(group => `
-    <div class="topic-group-label">${escapeHtml(group.label)}</div>
-    <div class="topic-grid">
-      ${group.topics.map(t => `
-        <button class="topic-card tone-${group.tone}" onclick="openTopic('${levelKey}', '${t.key}')">
-          <span class="topic-icon${t.small ? ' topic-icon-sm' : ''}">${escapeHtml(t.icon)}</span>
-          <span class="topic-title">${escapeHtml(t.title)}</span>
-          <span class="topic-sub">${escapeHtml(t.sub)}</span>
+    <div class="topic-group-label tone-${group.tone}"><span class="tg-dot"></span>${escapeHtml(group.label)}</div>
+    <div class="topic-grid topic-grid-wide">
+      ${group.families.map(f => {
+        const qs = f.topics.flatMap(t => t.game.questions);
+        return `
+        <button class="topic-card tone-${group.tone}" onclick="openFamily('${levelKey}', '${f.key}')">
+          <span class="topic-icon${f.small ? ' topic-icon-sm' : ''}">${escapeHtml(f.icon)}</span>
+          <span class="topic-text">
+            <span class="topic-title">${escapeHtml(f.title)}</span>
+            <span class="topic-sub">${escapeHtml(f.sub)}</span>
+            <span class="topic-meta">
+              <span class="topic-count">${qs.length} questions</span>
+              ${DIFFS.map(lv => { const c = qs.filter(q => q.level === lv).length; return c ? `<span class="topic-mix mix-${lv}"><i></i>${c} ${lv}</span>` : ''; }).join('')}
+            </span>
+          </span>
           <span class="topic-arrow">\u2192</span>
-        </button>`).join('')}
+        </button>`;
+      }).join('')}
     </div>`).join('');
 }
 
-// Topic card clicked: open that topic's lesson page.
-function openTopic(levelKey, topicKey){
+// Topic card clicked: show its Easy / Medium / Hard levels.
+const LEVEL_BLURB = {
+  easy:   { stars: '\u2605',             text: 'Smaller numbers to warm up', color: '#3FAE86', dark: '#2E8A69' },
+  medium: { stars: '\u2605\u2605',       text: 'Bigger numbers, more steps',  color: '#E0B232', dark: '#B88A12' },
+  hard:   { stars: '\u2605\u2605\u2605', text: 'The big ones. Test yourself', color: '#E5584F', dark: '#C0382F' }
+};
+function openFamily(levelKey, familyKey){
+  const fam = familiesOf(levelKey).find(f => f.key === familyKey);
+  if(!fam) return;
   const level = LEVELS[levelKey];
-  const topic = level && level.groups.flatMap(g => g.topics).find(t => t.key === topicKey);
+  document.getElementById('levelsBody').innerHTML = `
+    <div class="res-header">
+      <span class="res-badge${fam.icon.length >= 3 ? ' res-badge-sm' : ''}">${escapeHtml(fam.icon)}</span>
+      <div>
+        <div class="res-eyebrow">${escapeHtml(level.name)}</div>
+        <h3 class="res-title">${escapeHtml(fam.title)}</h3>
+      </div>
+    </div>
+    <p class="res-intro">Pick a level. Each level has its own quick lesson and 20 questions.</p>
+    <div class="topic-grid topic-grid-wide lvl-grid">
+      ${fam.topics.map(t => {
+        const B = LEVEL_BLURB[t.diff];
+        return `
+        <button class="topic-card" style="--tone:${B.color}; --tone-dark:${B.dark};" onclick="openTopic('${levelKey}', '${t.key}')">
+          <span class="topic-icon topic-icon-sm">${B.stars}</span>
+          <span class="topic-text">
+            <span class="topic-title">${DIFF_NAME[t.diff]}</span>
+            <span class="topic-sub">${B.text}</span>
+            <span class="topic-meta"><span class="topic-count">${t.game.questions.length} questions</span></span>
+          </span>
+          <span class="topic-arrow">\u2192</span>
+        </button>`;
+      }).join('')}
+    </div>`;
+  showWizardStep('levels');
+  window.scrollTo({ top:0, behavior:'smooth' });
+}
+function backToTopicList(){
+  showWizardStep('topics');
+  window.scrollTo({ top:0, behavior:'smooth' });
+}
+
+// Level card clicked: open that level's lesson page.
+function openTopic(levelKey, topicKey){
+  const topic = allTopicsOf(levelKey).find(t => t.key === topicKey);
   if(topic) showTopicResources(levelKey, topic);
 }
 
-// Shows the lesson materials (video, slides, assessment) for a topic.
 let currentTopicRef = null;
 
-function allTopicsOf(levelKey){ return LEVELS[levelKey].groups.flatMap(g => g.topics); }
-
+// Back from a lesson page: return to that topic's Easy / Medium / Hard screen.
 function goBackToTopics(){
+  const fam = currentTopicRef && familyOf(currentTopicRef.levelKey, currentTopicRef.topicKey);
+  if(fam){ openFamily(currentTopicRef.levelKey, fam.key); return; }
   showWizardStep('topics');
   window.scrollTo({top:0, behavior:'smooth'});
 }
 function backToTopicTop(){
   window.scrollTo({top:0, behavior:'smooth'});
 }
+// Next goes Easy, Medium, Hard, then on to the next topic's Easy.
 function goNextTopic(){
   if(!currentTopicRef) return;
   const list = allTopicsOf(currentTopicRef.levelKey);
@@ -995,7 +1314,8 @@ function goNextTopic(){
     showTopicResources(currentTopicRef.levelKey, list[idx + 1]);
     window.scrollTo({top:0, behavior:'smooth'});
   } else {
-    goBackToTopics();   // that was the last topic
+    renderTopics(currentTopicRef.levelKey);   // that was the last level of the last topic
+    backToTopicList();
   }
 }
 
@@ -1003,12 +1323,12 @@ function showTopicResources(levelKey, topic){
   currentTopicRef = { levelKey, topicKey: topic.key };
   const _list = allTopicsOf(levelKey);
   const _isLast = _list.findIndex(t => t.key === topic.key) >= _list.length - 1;
-  document.getElementById('resNextBtn').textContent = _isLast ? 'All topics ✓' : 'Next Topic →';
+  document.getElementById('resNextBtn').textContent = _isLast ? 'All topics ✓' : 'Next Level →';
   const level = LEVELS[levelKey];
   const badge = document.getElementById('resBadge');
   badge.textContent = topic.icon;
   badge.classList.toggle('res-badge-sm', topic.icon.length >= 3);
-  document.getElementById('resEyebrow').textContent = level.name;
+  document.getElementById('resEyebrow').textContent = level.name + (topic.diff ? ' \u00B7 ' + DIFF_NAME[topic.diff] : '');
   document.getElementById('resTitle').textContent = topic.title;
 
   const ICONS = {
@@ -1019,10 +1339,10 @@ function showTopicResources(levelKey, topic){
   const video = resources.find(r=>r.type==='video');
   const others = resources.filter(r=>r.type!=='video');
 
-  // YouTube video cards live in index.html (#resStaticVideos): stop & hide them all, then show this topic's set.
+  // YouTube video cards live in binary-portal.html (#resStaticVideos): stop & hide them all, then show this topic's set.
   stopAllLessonVideos();
-  if(video && video.staticId){
-    const el = document.getElementById(video.staticId);
+  {
+    const el = document.getElementById((video && video.staticId) ? video.staticId : 'vid-' + levelKey + '-' + topic.key);
     if(el){
       el.hidden = false;
       el.querySelectorAll('iframe[data-src]').forEach(f => { f.src = f.dataset.src; });
@@ -1041,7 +1361,7 @@ function showTopicResources(levelKey, topic){
              <div class="res-video-error">
                <span>⚠️</span>
                <b>Video not found</b>
-               <p>Put the file here:<br><code>${escapeHtml(video.file)}</code><br>(next to gen-portal.html)</p>
+               <p>Put the file here:<br><code>${escapeHtml(video.file)}</code><br>(next to binary-portal.html)</p>
              </div>`
           : `<iframe src="https://www.youtube-nocookie.com/embed/${escapeHtml(video.videoId)}" title="${escapeHtml(video.title)}"
                loading="lazy" allow="accelerometer; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>`}
@@ -1068,12 +1388,839 @@ function showTopicResources(levelKey, topic){
 
   document.getElementById('resBody').innerHTML = resources.length
     ? videoHtml + (cardsHtml ? `<div class="res-grid">${cardsHtml}</div>` : '')
+    : topic.lesson ? renderLesson(topic)
     : `<div class="res-empty"><span>🚧</span><h4>Lesson materials coming soon</h4><p>The video, slides and assessment for ${escapeHtml(topic.title)} will be added here.</p></div>`;
   document.getElementById('resBody').insertAdjacentHTML('beforeend', '<div id="gameMount"></div><div id="sketchMount"></div>');
   gameInit(topic);
   sketchInit(topic);
   markActiveToday();
   showWizardStep('resources');
+}
+
+/* ================= QUICK LESSON CARD (shown above the mini game) ================= */
+function lessonRefHtml(kind){
+  if(kind === 'place'){
+    let cells = '';
+    for(let e = 7; e >= 0; e--){
+      cells += `<div class="ref-chip"><b>${1 << e}</b><span>2<sup>${e}</sup></span></div>`;
+    }
+    return `<div class="lesson-ref"><h5>Cheat sheet: place values of one byte</h5><div class="ref-grid">${cells}</div></div>`;
+  }
+  const bits = kind === 'oct' ? 3 : 4;
+  const count = kind === 'oct' ? 8 : 16;
+  let cells = '';
+  for(let i = 0; i < count; i++){
+    cells += `<div class="ref-chip"><b>${i.toString(16).toUpperCase()}</b><span>${i.toString(2).padStart(bits, '0')}</span></div>`;
+  }
+  const title = kind === 'oct' ? 'Cheat sheet: octal digit = 3 bits' : 'Cheat sheet: hex digit = 4 bits';
+  return `<div class="lesson-ref"><h5>${title}</h5><div class="ref-grid">${cells}</div></div>`;
+}
+
+/* ================= CHEAT SHEET (tap a card for details, rules for the operation, quick facts, live converter) =================
+   Everything on the cheat sheet is calculated by the program, so the examples are always correct. */
+const CS_ORD = ['1st','2nd','3rd','4th','5th','6th','7th','8th'];
+const CS_PLACE_NAMES = ['ones','twos','fours','eights','sixteens','thirty-twos','sixty-fours','one-hundred-twenty-eights'];
+const CS_SUP = '\u2070\u00B9\u00B2\u00B3\u2074\u2075\u2076\u2077\u2078\u2079';
+function csPow(base, e){ return String(base) + String(e).split('').map(d => CS_SUP[+d]).join(''); }
+function csBits(n, pad){ return n.toString(2).padStart(pad || 1, '0'); }
+function csTerms(n, count){ const t = []; for(let i = count - 1; i >= 0; i--) if((n >> i) & 1) t.push(1 << i); return t; }
+function csGroup(str, size){ const g = []; for(let i = str.length; i > 0; i -= size) g.unshift(str.slice(Math.max(0, i - size), i)); return g.join(' '); }
+function csSec(title, body, cls){ return `<div class="cs-sec ${cls || ''}"><h6>${title}</h6>${body}</div>`; }
+function csLine(t){ return `<div class="cs-line">${t}</div>`; }
+function csDetail(i, big, sub, secs){
+  return `<div class="cs-detail" data-for="${i}" hidden>
+    <div class="cs-dhead"><span class="cs-dbig">${big}</span><span class="cs-dsub">${sub}</span></div>
+    <div class="cs-dgrid">${secs}</div>
+  </div>`;
+}
+
+/* ----- Explore tab: one detail card for every tile ----- */
+function csPlaceDetailSmall(e){
+  const val = 1 << e;
+  const n = val | (0b10110101 & (val - 1));               // an example number that uses this place
+  const bin = csBits(n, e + 1), terms = csTerms(n, e + 1);
+  const sumLine = terms.length === 1 ? `${bin} = ${terms[0]}` : `${bin} = ${terms.join(' + ')} = ${n}`;
+  let left = n, rows = '';
+  for(let i = e; i >= 0; i--){
+    const pv = 1 << i;
+    if(left >= pv){ rows += `<tr><td>${pv}</td><td>${left} \u2265 ${pv}</td><td><b class="on">1</b></td><td>${left} \u2212 ${pv} = ${left - pv}</td></tr>`; left -= pv; }
+    else          { rows += `<tr><td>${pv}</td><td>${left} &lt; ${pv}</td><td><b>0</b></td><td>nothing to subtract</td></tr>`; }
+  }
+  const secs =
+    csSec('What it means', csLine(`A <b>1</b> in this place adds <b>${val}</b> to the number. A <b>0</b> adds nothing.`) +
+      csLine(`It is the <b>${CS_ORD[e]}</b> place from the right (the ${CS_PLACE_NAMES[e]} place).`) +
+      csLine(e ? `Every place is double the one before it: ${val / 2} \u00D7 2 = ${val}.` : `Every place is double the one before it, starting from 1.`) +
+      csLine(`As a binary number it is <b>1${'0'.repeat(e)}</b>${e ? ` (a 1 followed by ${e} zero${e > 1 ? 's' : ''})` : ''}.`)) +
+    csSec('Binary \u2192 Decimal example', csLine(`<b>${sumLine}</b>`) + csLine(`Add the place value of every 1. Skip the 0s.`)) +
+    csSec(`Decimal \u2192 Binary example: ${n}`,
+      `<div class="cs-tablewrap"><table class="cs-table"><thead><tr><th>Place</th><th>Does it fit?</th><th>Bit</th><th>Left over</th></tr></thead><tbody>${rows}</tbody></table></div>` +
+      csLine(`Reading the bits from top to bottom gives <b>${bin}</b>.`), 'wide') +
+    csSec('Good to know', csLine(`${e + 1} bit${e ? 's' : ''} can hold the numbers 0 to <b>${(1 << (e + 1)) - 1}</b>.`) +
+      csLine(e === 7 ? 'One byte is 8 bits, so it holds 0 to 255.' : e === 3 ? 'Four bits (a nibble) make exactly one hexadecimal digit.' : e === 2 ? 'Three bits make exactly one octal digit (0 to 7).' : `This place is worth exactly 1 more than all the smaller places added together (${val - 1} + 1 = ${val}).`));
+  return csDetail(e, `${CS_PLACE_NAMES[e].charAt(0).toUpperCase()}${CS_PLACE_NAMES[e].slice(1)}`, `${csPow(2, e)} = ${val}`, secs);
+}
+
+const CS_OCT_NOTES = [
+  'Zero: all three bits are off (000). Inside a number never drop these zeros: 705\u2088 = 111 000 101.',
+  'The smallest non-zero digit: only the ones bit is on. In file permissions, 1 means execute.',
+  'Only the twos bit is on. In file permissions, 2 means write.',
+  'The twos and ones bits are on: 2 + 1 = 3. In file permissions, 3 means write + execute.',
+  'Only the fours bit is on. In file permissions, 4 means read.',
+  'The fours and ones bits are on: 4 + 1 = 5. In file permissions, 5 means read + execute.',
+  'The fours and twos bits are on: 4 + 2 = 6. In file permissions, 6 means read + write.',
+  'The largest octal digit: every bit is on (111). In file permissions, 7 means read + write + execute.'
+];
+function csOctDetail(d){
+  const bits = csBits(d, 3), terms = csTerms(d, 3), other = (d + 3) % 8;
+  const os = d.toString(8) + other.toString(8), dec = d * 8 + other;
+  const secs =
+    csSec('What it means', csLine(`Octal digit <b>${d}</b> is binary <b>${bits}</b> and decimal <b>${d}</b>.`) +
+      csLine(`The three bits are worth 4, 2 and 1: <b>${bits} = ${terms.length ? terms.join(' + ') : '0'}${terms.length > 1 ? ' = ' + d : ''}</b>.`) +
+      csLine(CS_OCT_NOTES[d])) +
+    csSec('Binary \u2192 Octal example', csLine(`Binary <b>${csBits(d, 3)} ${csBits(other, 3)}</b> is two groups of 3.`) +
+      csLine(`${csBits(d, 3)} = ${d} and ${csBits(other, 3)} = ${other}`) + csLine(`So the octal number is <b>${os}</b>.`)) +
+    csSec('Octal \u2192 Binary example', csLine(`Octal <b>${os}</b>: turn each digit into 3 bits.`) +
+      csLine(`${d} \u2192 ${csBits(d, 3)} and ${other} \u2192 ${csBits(other, 3)}`) + csLine(`Join them: <b>${csBits(d, 3)}${csBits(other, 3)}</b>.`)) +
+    csSec('Octal \u2192 Decimal check', csLine(`${os}\u2088 = ${d} \u00D7 8 + ${other} = <b>${dec}</b>`) + csLine(`Every octal place is worth 8 times the place to its right.`));
+  return csDetail(d, `${d}`, `octal digit \u00B7 bits ${bits}`, secs);
+}
+
+const CS_HEX_NOTES = {
+  10:'A is ten. It is the first letter-digit, the first number after 9.',
+  11:'B is eleven.',
+  12:'C is twelve. A dozen eggs is C eggs.',
+  13:'D is thirteen.',
+  14:'E is fourteen.',
+  15:'F is fifteen, the biggest hex digit (all four bits on). FF = 255 is the biggest byte, and #FF0000 is pure red on a web page.'
+};
+function csHexDetail(h){
+  const L = h.toString(16).toUpperCase(), bits = csBits(h, 4), terms = csTerms(h, 4);
+  const other = (h + 5) % 16, O = other.toString(16).toUpperCase(), hs = L + O, dec = h * 16 + other;
+  const secs =
+    csSec('What it means', csLine(`Hex digit <b>${L}</b> is binary <b>${bits}</b> and decimal <b>${h}</b>.`) +
+      csLine(`The four bits are worth 8, 4, 2 and 1: <b>${bits} = ${terms.length ? terms.join(' + ') : '0'}${terms.length > 1 ? ' = ' + h : ''}</b>.`) +
+      csLine(h > 9 ? CS_HEX_NOTES[h] : (h === 0 ? 'Zero: all four bits are off (0000). Keep these zeros inside a number: 205\u2081\u2086 = 0010 0000 0101.' : `Digits 0 to 9 keep the same value in hex and decimal.`))) +
+    csSec('Binary \u2192 Hex example', csLine(`Binary <b>${csBits(h, 4)} ${csBits(other, 4)}</b> is two groups of 4.`) +
+      csLine(`${csBits(h, 4)} = ${L} and ${csBits(other, 4)} = ${O}`) + csLine(`So the hex number is <b>${hs}</b>.`)) +
+    csSec('Hex \u2192 Binary example', csLine(`Hex <b>${hs}</b>: turn each digit into 4 bits.`) +
+      csLine(`${L} \u2192 ${csBits(h, 4)} and ${O} \u2192 ${csBits(other, 4)}`) + csLine(`Join them: <b>${csBits(h, 4)}${csBits(other, 4)}</b>.`)) +
+    csSec('Hex \u2192 Decimal check', csLine(`${hs}\u2081\u2086 = ${L} \u00D7 16 + ${O} = ${h} \u00D7 16 + ${other} = <b>${dec}</b>`) + csLine(`Every hex place is worth 16 times the place to its right.`));
+  return csDetail(h, L, `hex digit \u00B7 bits ${bits}`, secs);
+}
+
+/* ----- Operation tab: rules + a worked example in binary (calculated live) ----- */
+function csPre(rows){ return `<pre class="cs-pre" tabindex="0">${rows.join('\n')}</pre>`; }
+function csCells(str, w){ return str.padStart(w, ' ').split('').join(' '); }
+function csOpWorked(op, a, b){
+  const A = a.toString(2), B = b.toString(2), lab = 9;
+  if(op === 'add'){
+    const R = (a + b).toString(2), w = R.length, pa = A.padStart(w, '0'), pb = B.padStart(w, '0');
+    const carry = Array(w).fill(' '); let c = 0;
+    for(let i = w - 1; i >= 0; i--){ const s = (+pa[i]) + (+pb[i]) + c; c = s >= 2 ? 1 : 0; if(c && i > 0) carry[i - 1] = '1'; }
+    const hl = s => s.replace(/1/g, '<i>1</i>');
+    return { pre: csPre([
+        'carry'.padEnd(lab) + hl(carry.join(' ')),
+        ''.padEnd(lab) + csCells(A, w),
+        '+'.padEnd(lab - 1) + ' ' + csCells(B, w),
+        ''.padEnd(lab) + '\u2500'.repeat(w * 2 - 1),
+        ''.padEnd(lab) + csCells(R, w)]), result: R,
+      note: `Work from the right. Write the sum bit and carry the 1 to the next column. Check in decimal: ${a} + ${b} = ${a + b}.` };
+  }
+  if(op === 'sub'){
+    const R = (a - b).toString(2), w = A.length, pa = A.padStart(w, '0'), pb = B.padStart(w, '0'), rr = R.padStart(w, '0');
+    const borrow = Array(w).fill(' '); let br = 0;
+    for(let i = w - 1; i >= 0; i--){ let d = (+pa[i]) - (+pb[i]) - br; if(d < 0){ d += 2; br = 1; if(i > 0) borrow[i - 1] = '1'; } else br = 0; }
+    const hl = s => s.replace(/1/g, '<i>1</i>');
+    return { pre: csPre([
+        'borrow'.padEnd(lab) + hl(borrow.join(' ')),
+        ''.padEnd(lab) + csCells(A, w),
+        '\u2212'.padEnd(lab - 1) + ' ' + csCells(B, w),
+        ''.padEnd(lab) + '\u2500'.repeat(w * 2 - 1),
+        ''.padEnd(lab) + rr.split('').join(' ')]), result: rr.replace(/^0+(?=.)/, ''),
+      note: `Work from the right. When a column shows 0 \u2212 1, borrow a 1 from the next column on the left (that makes 10 \u2212 1 = 1). Check in decimal: ${a} \u2212 ${b} = ${a - b}.` };
+  }
+  if(op === 'mul'){
+    const R = (a * b).toString(2), parts = [];
+    for(let i = 0; i < B.length; i++){ if(B[B.length - 1 - i] === '1') parts.push({ i, v:a << i }); }
+    const lines = parts.map(p => `Bit ${p.i} of ${B} is 1 \u2192 write ${A}${p.i ? ' shifted ' + p.i + ' place' + (p.i > 1 ? 's' : '') + ' to the left' : ''} = <b>${p.v.toString(2)}</b>`);
+    const zeros = B.split('').reverse().map((bit, i) => bit === '0' ? i : -1).filter(i => i >= 0);
+    if(zeros.length) lines.push(`Bit${zeros.length > 1 ? 's' : ''} ${zeros.join(', ')} ${zeros.length > 1 ? 'are' : 'is'} 0 \u2192 nothing to write.`);
+    lines.push(`Add the lines: ${parts.map(p => p.v.toString(2)).join(' + ')} = <b>${R}</b>`);
+    lines.push(`Check in decimal: ${a} \u00D7 ${b} = ${a * b}.`);
+    return { html: lines.map(csLine).join(''), result: R };
+  }
+  // division: long division one bit at a time
+  const R = (a / b).toString(2), lines = []; let r = 0, q = '';
+  A.split('').forEach(bit => {
+    r = r * 2 + (+bit); const fits = r >= b;
+    lines.push(`Bring down ${bit} \u2192 ${r.toString(2)} ${fits ? '\u2265' : '<'} ${B} \u2192 write <b>${fits ? 1 : 0}</b>${fits ? ` and subtract (left over ${(r - b).toString(2)})` : ''}`);
+    if(fits) r -= b; q += fits ? '1' : '0';
+  });
+  lines.push(`Drop the leading zeros: the quotient is <b>${q.replace(/^0+(?=.)/, '')}</b>.`);
+  lines.push(`Check in decimal: ${a} \u00F7 ${b} = ${a / b}.`);
+  return { html: lines.map(csLine).join(''), result: q.replace(/^0+(?=.)/, '') };
+}
+function csOpPane(op, from){
+  const O = ARITH[op], [a, b] = O.ex;
+  const rules = {
+    add:[['0 + 0','0'],['0 + 1','1'],['1 + 0','1'],['1 + 1','10','write 0, carry 1'],['1 + 1 + 1','11','write 1, carry 1']],
+    sub:[['0 \u2212 0','0'],['1 \u2212 0','1'],['1 \u2212 1','0'],['0 \u2212 1','1','borrow: 10 \u2212 1 = 1']],
+    mul:[['0 \u00D7 0','0'],['0 \u00D7 1','0'],['1 \u00D7 0','0'],['1 \u00D7 1','1'],['\u00D7 10 (\u00D7 2)','shift left','adds one 0 on the right']],
+    div:[['0 \u00F7 1','0'],['1 \u00F7 1','1'],['\u00F7 10 (\u00F7 2)','shift right','drops one bit on the right'],['\u00F7 0','not allowed','never divide by zero']]
+  }[op];
+  const chips = rules.map(r => `<div class="cs-rule"><b>${r[0]} = ${r[1]}</b>${r[2] ? `<span>${r[2]}</span>` : ''}</div>`).join('');
+  const w = csOpWorked(op, a, b);
+  const title = { add:'Column addition', sub:'Column subtraction', mul:'Shift and add', div:'Long division' }[op];
+  const baseNote = from === 8 ? 'Your numbers are octal. Turn every digit into 3 bits (or convert to decimal first), then use these binary rules.'
+                 : from === 16 ? 'Your numbers are hexadecimal. Turn every digit into 4 bits (or convert to decimal first), then use these binary rules.'
+                 : from === 10 ? 'Your numbers are decimal. Either convert them to binary first, or work in decimal and convert the result at the end.'
+                 : 'Your numbers are already binary, so you can use these rules directly.';
+  return `
+    <div class="cs-opgrid">
+      ${csSec(`Binary ${O.name.toLowerCase()} rules`, `<div class="cs-rules">${chips}</div>`)}
+      ${csSec('Your numbers', csLine(baseNote) + csLine(`<b>Tip:</b> ${O.tip.replace(/^[A-Za-z ]+?:\s*/, '')}`))}
+    </div>
+    ${csSec(`Worked example: ${a.toString(2)} ${O.show} ${b.toString(2)} (${a} ${O.show} ${b} in decimal)`, (w.pre || '') + (w.html || '') + (w.pre ? csLine(w.note) : ''), 'cs-worked')
+      .replace('class="cs-sec cs-worked"', `class="cs-sec cs-worked" data-op="${op}" data-result="${w.result}" data-title="${title}"`)}`;
+}
+
+/* ----- Quick facts tab ----- */
+function csFactsPane(kind, item){
+  const chips = (arr) => `<div class="cs-facts">${arr.map(x => `<div class="cs-fact"><b>${x[0]}</b><span>${x[1]}</span></div>`).join('')}</div>`;
+  const powers = (base, max, from) => { const r = []; for(let e = from || 0; e <= max; e++) r.push([`${csPow(base, e)}`, csComma(BigInt(base) ** BigInt(e))]); return r; };
+  const map = `<div class="cs-map">
+      <div class="cs-map-i ${kind === 'place' ? 'on' : ''}"><b>Binary \u21C4 Decimal</b><span>place values: 1, 2, 4, 8, 16 ...</span></div>
+      <div class="cs-map-i ${kind === 'oct' ? 'on' : ''}"><b>Binary \u21C4 Octal</b><span>groups of 3 bits</span></div>
+      <div class="cs-map-i ${kind === 'hex' ? 'on' : ''}"><b>Binary \u21C4 Hex</b><span>groups of 4 bits</span></div>
+    </div>`;
+  let a, b, c;
+  if(kind === 'place'){
+    a = csSec('Powers of 2 (first 17)', chips(powers(2, 16)), 'wide') + csSec('Big powers of 2', chips([...powers(2, 24, 20).filter((_, i) => i % 4 === 0), ...powers(2, 32, 30).filter((_, i) => i !== 1), ...powers(2, 64, 48).filter((_, i) => i % 16 === 0)]), 'wide');
+    b = csSec('How many bits do I need?', chips([['1 bit','0 to 1'],['2 bits','0 to 3'],['3 bits','0 to 7'],['4 bits','0 to 15'],['8 bits','0 to 255'],['16 bits','0 to 65,535'],['32 bits','0 to 4,294,967,295'],['64 bits','0 to 18,446,744,073,709,551,615']]));
+    c = csSec('Speed tricks', csLine('The last bit tells you odd or even: ends in <b>0</b> = even, ends in <b>1</b> = odd.') +
+      csLine('Add a <b>0</b> on the right to double the number: 101 (5) \u2192 1010 (10).') +
+      csLine('All ones is one less than the next power of 2: 1111 = 16 \u2212 1 = 15.')) +
+      csSec('Common mistakes', csLine('Start counting place values from the <b>right</b>, with 1.') + csLine('A 0 bit still takes up a place. Do not skip it.') + csLine('Leading zeros change nothing: 0011 = 11.'));
+  } else if(kind === 'oct'){
+    a = csSec('Powers of 8', chips(powers(8, 8)));
+    b = csSec('File permissions (a real use of octal)', chips([['4','read (r)'],['2','write (w)'],['1','execute (x)'],['755','111 101 101 = rwxr-xr-x']]));
+    c = csSec('How to group', csLine('Binary \u2192 octal: group from the <b>right</b> in 3s, then add zeros on the <b>left</b> if the last group is short.') +
+      csLine('Example: 1101 \u2192 001 101 \u2192 15.')) +
+      csSec('Common mistakes', csLine('Octal only uses digits <b>0 to 7</b>. There is no 8 or 9.') + csLine('Do not group from the left.') + csLine('Keep zeros inside a number: 705\u2088 = 111 000 101.'));
+  } else {
+    a = csSec('Powers of 16', chips(powers(16, 8)));
+    b = csSec('Letters and web colors', chips([['A','10'],['B','11'],['C','12'],['D','13'],['E','14'],['F','15'],['FF','255'],['#FF8800','red 255, green 136, blue 0']]));
+    c = csSec('How to group', csLine('Binary \u2192 hex: group from the <b>right</b> in 4s, then add zeros on the <b>left</b> if the last group is short.') +
+      csLine('Example: 101111 \u2192 0010 1111 \u2192 2F.')) +
+      csSec('Common mistakes', csLine('Remember A to F are the digits 10 to 15.') + csLine('Do not group from the left.') + csLine('Capital and small letters mean the same: 2f = 2F.'));
+  }
+  return `<div class="cs-factsgrid">${map}${a}${b}${c}</div>`;
+}
+
+/* ----- Converter tab ----- */
+const CS_RX = { 2:/^[01]+$/, 8:/^[0-7]+$/, 10:/^[0-9]+$/, 16:/^[0-9A-F]+$/ };
+const CS_NAME = { 2:'Binary', 8:'Octal', 10:'Decimal', 16:'Hexadecimal' };
+const CS_MAX = (1n << 64n) - 1n;           // the biggest 64-bit number
+function csParseBig(raw, base){ let n = 0n; const B = BigInt(base); for(const ch of raw) n = n * B + BigInt(parseInt(ch, 16)); return n; }
+function csConvPane(base, kind){
+  const start = base === 10 ? '45' : (45).toString(base).toUpperCase();
+  const btns = [2, 8, 10, 16].map(b => `<button type="button" class="cs-base ${b === base ? 'on' : ''}" data-base="${b}" aria-pressed="${b === base}" onclick="csConvBase(this)">${CS_NAME[b]}</button>`).join('');
+  const rows = [2, 8, 10, 16].map(b => `<div class="cs-out"><span class="cs-out-l">${CS_NAME[b]} <i>base ${b}</i></span><b class="cs-out-v" data-out="${b}">\u2014</b><button type="button" class="cs-copy" aria-label="Copy the ${CS_NAME[b].toLowerCase()} number" onclick="csCopy(this)">Copy</button></div>`).join('');
+  return `<div class="cs-conv" data-base="${base}">
+    <p class="cs-conv-intro">Type a number and see it in every number system, up to 64 bits. Great for checking your answers.</p>
+    <div class="cs-bases" role="group" aria-label="Number system of the number you type">${btns}</div>
+    <input class="cs-conv-in" type="text" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="90" value="${start}" oninput="csConvRun(this.closest('.cs-conv'))" aria-label="Number to convert">
+    <div class="cs-conv-err" role="status" aria-live="polite"></div>
+    <div class="cs-outs">${rows}</div>
+    <details class="cs-steps"><summary>\uD83D\uDCD6 Show the steps</summary><div class="cs-dgrid cs-steps-body"></div></details>
+  </div>
+  ${csBitsPane(kind || 'place')}`;
+}
+function csConvRun(root){
+  if(!root) return;
+  const base = +root.dataset.base, inp = root.querySelector('.cs-conv-in'), err = root.querySelector('.cs-conv-err');
+  const raw = inp.value.trim().toUpperCase().replace(/[\s_,]/g, '');
+  const outs = root.querySelectorAll('[data-out]'), steps = root.querySelector('.cs-steps'), body = root.querySelector('.cs-steps-body');
+  const clear = msg => { outs.forEach(o => { o.textContent = '\u2014'; o.classList.remove('has'); }); err.textContent = msg; err.classList.toggle('show', !!msg); inp.classList.toggle('bad', !!msg); if(body) body.innerHTML = ''; if(steps) steps.hidden = true; };
+  if(!raw){ clear(''); return; }
+  if(!CS_RX[base].test(raw)){
+    const ok = { 2:'binary only uses 0 and 1', 8:'octal only uses the digits 0 to 7', 10:'decimal only uses the digits 0 to 9', 16:'hexadecimal only uses 0 to 9 and A to F' }[base];
+    clear(`That is not a valid ${CS_NAME[base].toLowerCase()} number: ${ok}.`); return;
+  }
+  const n = csParseBig(raw, base);
+  if(n > CS_MAX){ clear('That number is too big. Try one up to 18,446,744,073,709,551,615 (64 bits).'); return; }
+  err.textContent = ''; err.classList.remove('show'); inp.classList.remove('bad');
+  outs.forEach(o => {
+    const b = +o.dataset.out; let s = n.toString(b).toUpperCase();
+    if(b === 2 || b === 16) s = csGroup(s, 4); else if(b === 10) s = csComma(s);
+    o.textContent = s; o.classList.add('has');
+  });
+  if(body){ body.innerHTML = csConvSteps(n, base, raw).map(csExHtml).join(''); steps.hidden = false; }
+}
+function csConvBase(btn){
+  const root = btn.closest('.cs-conv'), inp = root.querySelector('.cs-conv-in'), old = +root.dataset.base, nb = +btn.dataset.base;
+  const raw = inp.value.trim().toUpperCase().replace(/[\s_,]/g, '');
+  if(raw && CS_RX[old].test(raw)){ const n = csParseBig(raw, old); if(n <= CS_MAX) inp.value = n.toString(nb).toUpperCase(); }
+  root.dataset.base = nb;
+  root.querySelectorAll('.cs-base').forEach(b => { const on = b === btn; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  csConvRun(root);
+}
+
+/* ================= CHEAT SHEET EXTRAS: more examples, practice, step-by-step converter, bit flipper =================
+   Every example and every practice answer is CALCULATED by these functions (never typed by hand), so they cannot be wrong.
+   Each generator returns { tag, title, lines[], answer, value }. `value` is the plain result, used to mark practice answers. */
+function csDigit(v){ return v.toString(16).toUpperCase(); }
+function csTrim0(s){ return s.replace(/^0+(?=.)/, ''); }
+function csLow(b){ return CS_NAME[b].toLowerCase(); }
+
+function csN(x){ const b = BigInt(x); return b >= 10000n ? csComma(b) : b.toString(); }
+function csTermList(arr, max){ return arr.length <= max ? arr.map(csN).join(' + ') : arr.slice(0, 6).map(csN).join(' + ') + ` + \u2026 (${arr.length} terms)`; }
+function csExBinToDec(s){
+  const len = s.length, val = BigInt('0b' + s), ones = [];
+  s.split('').forEach((ch, i) => { if(ch === '1') ones.push(len - 1 - i); });
+  const used = ones.map(p => 1n << BigInt(p));
+  const addLine = !used.length ? 'There are no 1s, so the value is <b>0</b>.'
+    : `Add the place values that sit above a 1: <b>${csTermList(used, len <= 12 ? 99 : 8)}${used.length > 1 ? ' = ' + csN(val) : ''}</b>`;
+  let lines;
+  if(len <= 12){
+    lines = [`Place values: ${s.split('').map((_, i) => csN(1n << BigInt(len - 1 - i))).join(' ')}`, `Bits: ${s.split('').join(' ')}`, addLine];
+  } else {
+    lines = [`Bits: ${csGroup(s, 4)}`, `The 1s are at places ${ones.length <= 12 ? ones.join(', ') : ones.length + ' different places'} (count from 0 on the right).`, addLine];
+  }
+  return { tag:'toDec', title:`Binary \u2192 decimal: ${csGroup(s, 4)}`, value:val.toString(), lines,
+    answer:`${csGroup(s, 4)} in binary = ${csN(val)} in decimal` };
+}
+function csExDecToBinSub(num){
+  const lines = []; let left = num, bits = '';
+  for(let e = 7; e >= 0; e--){
+    const w = 1 << e;
+    if(left >= w){ bits += '1'; lines.push(`${w} fits into ${left} \u2192 <b>1</b> (${left - w} left)`); left -= w; }
+    else { bits += '0'; lines.push(`${w} is bigger than ${left} \u2192 <b>0</b>`); }
+  }
+  return { tag:'fromDec', title:`Decimal \u2192 binary (subtract method): ${num}`, value:csTrim0(bits), lines,
+    answer:`${num} in decimal = ${csTrim0(bits)} in binary` };
+}
+function csExDecToBase(num, base){
+  const name = csLow(base), B = BigInt(base);
+  let q = BigInt(num);
+  if(q === 0n) return { tag:'fromDec', title:`Decimal \u2192 ${name}: 0`, value:'0', lines:['Zero is written 0 in every number system.'], answer:`0 in decimal = 0 in ${name}` };
+  const orig = q, steps = [], digits = [];
+  while(q > 0n){
+    const r = q % B, nq = q / B;
+    steps.push(`${csN(q)} \u00F7 ${base} = ${csN(nq)} remainder ${r}${r > 9n ? ' (' + csDigit(Number(r)) + ')' : ''}`);
+    digits.push(csDigit(Number(r))); q = nq;
+  }
+  digits.reverse();
+  const shown = steps.length > 12 ? [...steps.slice(0, 6), `\u2026 (${steps.length - 9} more steps, keep dividing the same way) \u2026`, ...steps.slice(-3)] : steps;
+  const val = digits.join('');
+  return { tag:'fromDec', title:`Decimal \u2192 ${name} (divide by ${base}): ${csN(orig)}`, value:val,
+    lines:[...shown, `Read the remainders from the bottom up: <b>${val}</b>`], answer:`${csN(orig)} in decimal = ${val} in ${name}` };
+}
+function csExGroup(s, size, base){
+  const pad = (size - (s.length % size)) % size, p = '0'.repeat(pad) + s, groups = [];
+  for(let i = 0; i < p.length; i += size) groups.push(p.slice(i, i + size));
+  const digits = groups.map(g => csDigit(parseInt(g, 2))), name = csLow(base), val = csTrim0(digits.join(''));
+  const lines = [`Group from the right, ${size} bits at a time: ${csGroup(s, size)}`];
+  if(pad) lines.push(`The first group is short, so add ${pad} zero${pad > 1 ? 's' : ''} on its left: ${groups.join(' ')}`);
+  if(groups.length <= 8) lines.push(groups.map((g, i) => `${g} = ${digits[i]}`).join(', '));
+  else lines.push(`Each group of ${size} bits becomes one digit: ${digits.join(' ')}`);
+  lines.push(`Write the digits side by side: <b>${digits.join('')}</b>`);
+  return { tag:'group', title:`Binary \u2192 ${name}: ${csGroup(s, 4)}`, value:val, lines, answer:`${csGroup(s, 4)} in binary = ${val} in ${name}` };
+}
+function csExUngroup(s, size, base){
+  const parts = s.split('').map(ch => parseInt(ch, base).toString(2).padStart(size, '0'));
+  const joined = parts.join(''), val = csTrim0(joined), name = csLow(base);
+  const lines = [s.length <= 8 ? s.split('').map((ch, i) => `${ch} = ${parts[i]}`).join(', ') : `Each digit becomes ${size} bits: ${parts.join(' ')}`, `Join the groups: ${s.length <= 8 ? joined : csGroup(joined, 4)}`];
+  if(val !== joined) lines.push(`Drop the zeros at the very front: <b>${s.length <= 8 ? val : csGroup(val, 4)}</b>`);
+  return { tag:'group', title:`${CS_NAME[base]} \u2192 binary: ${s}`, value:val, lines, answer:`${s} in ${name} = ${csGroup(val, 4)} in binary` };
+}
+function csExBaseToDec(s, base){
+  const n = s.length, name = csLow(base), B = BigInt(base);
+  const terms = s.split('').map((ch, i) => ({ ch, v:BigInt(parseInt(ch, base)), w:B ** BigInt(n - 1 - i) }));
+  const total = terms.reduce((a, t) => a + t.v * t.w, 0n);
+  const label = t => `${t.ch}${t.v > 9n ? ' (' + t.v + ')' : ''} \u00D7 ${csN(t.w)}`;
+  let lines;
+  if(n <= 8){
+    lines = [`Place values: ${terms.map(t => csN(t.w)).join(' ')}`, terms.map(label).join(' + '),
+      `${terms.map(t => csN(t.v * t.w)).join(' + ')}${terms.length > 1 ? ' = <b>' + csN(total) + '</b>' : ''}`];
+  } else {
+    const nz = terms.filter(t => t.v !== 0n);
+    lines = [`Each place is worth ${base} times the one on its right (\u2026, ${csN(B ** 2n)}, ${base}, 1).`,
+      `Only the non-zero digits add something: ${nz.slice(0, 8).map(label).join(' + ')}${nz.length > 8 ? ' + \u2026' : ''}`,
+      `Add everything up: <b>${csN(total)}</b>`];
+  }
+  return { tag:'toDec', title:`${CS_NAME[base]} \u2192 decimal: ${s}`, value:total.toString(), lines, answer:`${s} in ${name} = ${csN(total)} in decimal` };
+}
+
+function csExHtml(ex){
+  return `<div class="cs-sec cs-excard" data-tag="${ex.tag}"><h6>${ex.title}</h6>${ex.lines.map(csLine).join('')}<div class="cs-ans">\u2705 ${ex.answer}</div></div>`;
+}
+
+/* ----- More examples tab ----- */
+function csExampleList(kind){
+  if(kind === 'place') return [
+    ...['101','1101','10010','11001100','10101010','11111111','01000001'].map(csExBinToDec),
+    ...[45, 100, 200].map(csExDecToBinSub), ...[13, 37, 77, 156].map(n => csExDecToBase(n, 2))];
+  if(kind === 'oct') return [
+    ...['110101','1101011','101110','1000001','11111111'].map(s => csExGroup(s, 3, 8)),
+    ...['345','72','1604','777'].map(s => csExUngroup(s, 3, 8)),
+    ...['17','345','1604'].map(s => csExBaseToDec(s, 8)),
+    ...[100, 229, 500].map(n => csExDecToBase(n, 8))];
+  return [
+    ...['11010111','101111','1111111100','10100101','1001110'].map(s => csExGroup(s, 4, 16)),
+    ...['2F','A5','3C9','FF'].map(s => csExUngroup(s, 4, 16)),
+    ...['2F','A5','FF','1C','3E8'].map(s => csExBaseToDec(s, 16)),
+    ...[255, 300, 1000].map(n => csExDecToBase(n, 16))];
+}
+function csExamplesPane(kind){
+  const list = csExampleList(kind), tags = [];
+  list.forEach(e => { if(tags.indexOf(e.tag) < 0) tags.push(e.tag); });
+  const label = { toDec:'To decimal', fromDec:'From decimal', group: kind === 'oct' ? 'Binary \u21C4 octal' : 'Binary \u21C4 hex' };
+  const chips = ['all', ...tags].map((t, i) => `<button type="button" class="cs-base ${i === 0 ? 'on' : ''}" data-tag="${t}" aria-pressed="${i === 0}" onclick="csExFilter(this)">${t === 'all' ? 'All (' + list.length + ')' : label[t]}</button>`).join('');
+  return `<p class="cs-hint"><span aria-hidden="true">\uD83D\uDCDD</span> ${list.length} worked examples. Pick a type, then follow the steps.</p>
+    <div class="cs-bases cs-exfilter" role="group" aria-label="Filter examples">${chips}</div>
+    <div class="cs-dgrid cs-exgrid">${list.map(csExHtml).join('')}</div>`;
+}
+function csExFilter(btn){
+  const pane = btn.closest('.cs-pane'), tag = btn.dataset.tag;
+  pane.querySelectorAll('.cs-exfilter .cs-base').forEach(b => { const on = b === btn; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  pane.querySelectorAll('.cs-excard').forEach(c => { c.hidden = !(tag === 'all' || c.dataset.tag === tag); });
+}
+
+/* ----- Practice tab: random questions, checked by the program ----- */
+const CS_QLEVELS = { easy:'Easy', medium:'Medium', hard:'Hard', expert:'Expert' };
+function csRand(a, b){ return a + Math.floor(Math.random() * (b - a + 1)); }
+function csQuizMake(kind, level, avoid){
+  const range = kind === 'place' ? { easy:[3, 4], medium:[5, 6], hard:[7, 8], expert:[12, 16] }[level] : { easy:[3, 6], medium:[6, 9], hard:[9, 12], expert:[13, 24] }[level];
+  const types = kind === 'place' ? ['b2d', 'd2b'] : kind === 'oct' ? ['b2o', 'o2b', 'o2d', 'd2o'] : ['b2h', 'h2b', 'h2d', 'd2h'];
+  let q, tries = 0;
+  do {
+    const len = csRand(range[0], range[1]), n = csRand(Math.pow(2, len - 1), Math.pow(2, len) - 1), t = types[csRand(0, types.length - 1)];
+    const B = kind === 'oct' ? 8 : 16, size = kind === 'oct' ? 3 : 4;
+    if(t === 'b2d'){ q = { num:n.toString(2), from:2, to:10, ex:csExBinToDec(n.toString(2)) }; }
+    else if(t === 'd2b'){ q = { num:String(n), from:10, to:2, ex:csExDecToBase(n, 2) }; }
+    else if(t[0] === 'b'){ q = { num:n.toString(2), from:2, to:B, ex:csExGroup(n.toString(2), size, B) }; }
+    else if(t[2] === 'b'){ q = { num:n.toString(B).toUpperCase(), from:B, to:2, ex:csExUngroup(n.toString(B).toUpperCase(), size, B) }; }
+    else if(t[2] === 'd'){ q = { num:n.toString(B).toUpperCase(), from:B, to:10, ex:csExBaseToDec(n.toString(B).toUpperCase(), B) }; }
+    else { q = { num:String(n), from:10, to:B, ex:csExDecToBase(n, B) }; }
+    q.answer = q.ex.value;
+    tries++;
+  } while(avoid && q.num === avoid.num && q.from === avoid.from && q.to === avoid.to && tries < 20);
+  return q;
+}
+function csQuizNormalise(s, base){
+  s = String(s || '').trim().toUpperCase().replace(/[\s_,]/g, '');
+  return base === 10 ? s.replace(/^0+(?=.)/, '') : csTrim0(s);
+}
+function csQuizPane(){
+  const lv = Object.keys(CS_QLEVELS).map((k, i) => `<button type="button" class="cs-base ${i === 0 ? 'on' : ''}" data-level="${k}" aria-pressed="${i === 0}" onclick="csQuizLevel(this)">${CS_QLEVELS[k]}</button>`).join('');
+  return `<div class="cs-quiz" data-ready="0">
+    <p class="cs-hint"><span aria-hidden="true">\uD83C\uDFAF</span> Endless practice. Every question is new, and the program checks your answer.</p>
+    <div class="cs-bases" role="group" aria-label="Difficulty">${lv}</div>
+    <div class="cs-qscore" aria-live="polite"><span>\u2705 Correct <b data-s="ok">0</b></span><span>\uD83D\uDCDD Tried <b data-s="all">0</b></span><span>\uD83D\uDD25 Streak <b data-s="streak">0</b></span><span>\uD83C\uDFC6 Best <b data-s="best">0</b></span></div>
+    <div class="cs-qbox"><div class="cs-qask"></div><div class="cs-qnum"></div></div>
+    <div class="cs-qrow">
+      <input class="cs-q-in" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40" aria-label="Your answer" onkeydown="if(event.key==='Enter'){event.preventDefault();csQuizCheck(this.closest('.cs-quiz'));}">
+      <button type="button" class="cs-qbtn go" onclick="csQuizCheck(this.closest('.cs-quiz'))">Check</button>
+    </div>
+    <div class="cs-qfb" role="status" aria-live="polite"></div>
+    <div class="cs-qactions">
+      <button type="button" class="cs-qbtn" data-act="show" onclick="csQuizShow(this.closest('.cs-quiz'))">Show solution</button>
+      <button type="button" class="cs-qbtn" onclick="csQuizNew(this.closest('.cs-quiz'))">Next question \u2192</button>
+    </div>
+    <div class="cs-qsol"></div>
+  </div>`;
+}
+function csQuizState(root){
+  if(!root._s) root._s = { level:'easy', ok:0, all:0, streak:0, best:0, cur:null, done:false };
+  return root._s;
+}
+function csQuizScore(root){
+  const s = csQuizState(root);
+  ['ok', 'all', 'streak', 'best'].forEach(k => { const el = root.querySelector(`[data-s="${k}"]`); if(el) el.textContent = s[k]; });
+}
+function csQuizNew(root){
+  if(!root) return;
+  const s = csQuizState(root), kind = root.closest('.cheat').dataset.kind;
+  s.cur = csQuizMake(kind, s.level, s.cur); s.done = false;
+  const q = s.cur, word = { 2:'binary', 8:'octal', 10:'decimal', 16:'hexadecimal' };
+  root.querySelector('.cs-qask').textContent = `Convert from ${word[q.from]} to ${word[q.to]}:`;
+  root.querySelector('.cs-qnum').textContent = q.from === 2 ? csGroup(q.num, 4) : q.num;
+  const inp = root.querySelector('.cs-q-in'); inp.value = ''; inp.disabled = false; inp.classList.remove('bad', 'good');
+  const fb = root.querySelector('.cs-qfb'); fb.textContent = ''; fb.className = 'cs-qfb';
+  root.querySelector('.cs-qsol').innerHTML = '';
+  root.querySelector('[data-act="show"]').disabled = false;
+  root.dataset.ready = '1'; csQuizScore(root);
+  try{ inp.focus({ preventScroll:true }); }catch(_){}
+}
+function csQuizLevel(btn){
+  const root = btn.closest('.cs-quiz'); csQuizState(root).level = btn.dataset.level;
+  root.querySelectorAll('[data-level]').forEach(b => { const on = b === btn; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  csQuizNew(root);
+}
+function csQuizCheck(root){
+  const s = csQuizState(root); if(!s.cur || s.done) return;
+  const inp = root.querySelector('.cs-q-in'), fb = root.querySelector('.cs-qfb'), q = s.cur;
+  const mine = csQuizNormalise(inp.value, q.to);
+  if(!mine){ fb.className = 'cs-qfb bad'; fb.textContent = 'Type your answer first.'; return; }
+  const rx = CS_RX[q.to];
+  if(!rx.test(mine)){ fb.className = 'cs-qfb bad'; fb.textContent = `That is not a valid ${csLow(q.to)} number. Check the digits you used.`; return; }
+  s.all++; s.done = true; inp.disabled = true;
+  if(mine === q.answer){
+    s.ok++; s.streak++; if(s.streak > s.best) s.best = s.streak;
+    inp.classList.add('good'); fb.className = 'cs-qfb good'; fb.textContent = s.streak > 2 ? `Correct! ${s.streak} in a row!` : 'Correct! Well done.';
+  } else {
+    s.streak = 0; inp.classList.add('bad'); fb.className = 'cs-qfb bad';
+    fb.innerHTML = `Not quite. You wrote <b>${escapeHtml(mine)}</b>. The answer is <b>${escapeHtml(q.to === 2 ? csGroup(q.answer, 4) : q.answer)}</b>.`;
+    root.querySelector('.cs-qsol').innerHTML = csExHtml(q.ex);
+  }
+  root.querySelector('[data-act="show"]').disabled = true;
+  csQuizScore(root);
+}
+function csQuizShow(root){
+  const s = csQuizState(root); if(!s.cur) return;
+  root.querySelector('.cs-qsol').innerHTML = csExHtml(s.cur.ex);
+}
+
+/* ----- Converter helpers: step-by-step working, copy buttons and the bit flipper ----- */
+function csConvSteps(n, base, raw){
+  const bin = n.toString(2);
+  if(base === 2)  return [csExBinToDec(raw), csExGroup(raw, 3, 8), csExGroup(raw, 4, 16)];
+  if(base === 8)  return [csExUngroup(raw, 3, 8), csExBaseToDec(raw, 8), csExGroup(bin, 4, 16)];
+  if(base === 16) return [csExUngroup(raw, 4, 16), csExBaseToDec(raw, 16), csExGroup(bin, 3, 8)];
+  return [csExDecToBase(n, 2), csExGroup(bin, 3, 8), csExGroup(bin, 4, 16)];
+}
+function csCopy(btn){
+  const out = btn.parentElement.querySelector('.cs-out-v'), txt = out ? out.textContent.replace(/[\s,]/g, '') : '';
+  if(!txt || txt === '\u2014') return;
+  const done = () => { btn.textContent = 'Copied \u2713'; btn.classList.add('ok'); setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('ok'); }, 1300); };
+  const fallback = () => { const t = document.createElement('textarea'); t.value = txt; t.style.position = 'fixed'; t.style.opacity = '0'; document.body.appendChild(t); t.select(); try{ document.execCommand('copy'); done(); }catch(_){} t.remove(); };
+  if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(done, fallback); } else fallback();
+}
+/* ----- Big numbers: place values all the way up to a 64-bit number (BigInt keeps every digit exact) ----- */
+function csComma(v){ return v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+function csOrd(n){ const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
+// Short form for a tile: exact below one million, then "2.15 billion" (the exact value is always in the detail card).
+function csShortVal(v){
+  v = BigInt(v);
+  if(v < 1000000n) return csComma(v);
+  const names = [[10n ** 18n, 'quintillion'], [10n ** 15n, 'quadrillion'], [10n ** 12n, 'trillion'], [10n ** 9n, 'billion'], [10n ** 6n, 'million']];
+  for(const [d, nm] of names){
+    if(v >= d){
+      const x = Number((v * 200n + d) / (2n * d)) / 100;
+      return `${x.toFixed(2).replace(/\.?0+$/, '')} ${nm}`;
+    }
+  }
+  return csComma(v);
+}
+const CS_BIG_NOTES = {
+  8:'The first place of the second byte. One byte stops at 255, so 256 needs a ninth bit.',
+  10:'1,024 is the computer "kilo": 1 KiB = 1,024 bytes.',
+  15:'The top bit of a 16-bit number (2 bytes). 16 bits hold 0 to 65,535.',
+  16:'65,536 is how many different values 16 bits can make (0 to 65,535).',
+  20:'1,048,576 bytes = 1 MiB.',
+  23:'The top bit of a 24-bit number. 24 bits make 16,777,216 colours (8 bits each for red, green and blue).',
+  30:'1,073,741,824 bytes = 1 GiB.',
+  31:'The top bit of a 32-bit number. 32 bits hold 0 to 4,294,967,295.',
+  32:'4,294,967,296 is the number of possible IPv4 addresses.',
+  63:'The top bit of a 64-bit number. 64 bits hold 0 to 18,446,744,073,709,551,615.'
+};
+function csPlaceDetailBig(e){
+  const E = BigInt(e), val = 1n << E, mid = Math.floor(e / 2), midV = 1n << BigInt(mid), n = val | midV | 1n, bin = n.toString(2);
+  let left = n, rows = '';
+  const ones = [[val, e], [midV, mid], [1n, 0]];
+  ones.forEach(([pv, p], idx) => {
+    rows += `<tr><td>${csN(pv)}</td><td>${csN(left)} \u2265 ${csN(pv)}</td><td><b class="on">1</b></td><td>${csN(left)} \u2212 ${csN(pv)} = ${csN(left - pv)}</td></tr>`;
+    left -= pv;
+    if(idx < ones.length - 1){
+      const gap = p - ones[idx + 1][1] - 1;
+      if(gap > 0) rows += `<tr class="cs-gaprow"><td colspan="4">The ${gap} place${gap > 1 ? 's' : ''} in between (${csPow(2, ones[idx + 1][1] + 1)} to ${csPow(2, p - 1)}) are all too big, so each is a <b class="zero">0</b>.</td></tr>`;
+    }
+  });
+  const secs =
+    csSec('What it means', csLine(`A <b>1</b> in this place adds <b>${csComma(val)}</b> to the number. A <b>0</b> adds nothing.`) +
+      csLine(`This is bit number <b>${e}</b> (counting from 0 on the right). It sits in <b>byte ${Math.floor(e / 8) + 1}</b>.`) +
+      csLine(`Every place is double the one before it: ${csComma(val / 2n)} \u00D7 2 = ${csComma(val)}.`) +
+      csLine(`As a binary number it is <b>${csGroup('1' + '0'.repeat(e), 4)}</b> (a 1 followed by ${e} zeros).`) +
+      csLine(`${csPow(2, e)} means 2 multiplied by itself ${e} times.`)) +
+    csSec('Binary \u2192 Decimal example', csLine(`<b>${csGroup(bin, 4)}</b>`) +
+      csLine(`Only three places are 1: ${csN(val)} + ${csN(midV)} + 1 = <b>${csN(n)}</b>`) + csLine('Add the place value of every 1. Skip the 0s.')) +
+    csSec(`Decimal \u2192 Binary example: ${csN(n)}`,
+      `<div class="cs-tablewrap"><table class="cs-table"><thead><tr><th>Place</th><th>Does it fit?</th><th>Bit</th><th>Left over</th></tr></thead><tbody>${rows}</tbody></table></div>` +
+      csLine(`Every other place is 0, so the binary number is <b>${csGroup(bin, 4)}</b>.`), 'wide') +
+    csSec('Good to know', csLine(`${e + 1} bits can hold the numbers 0 to <b>${csComma((1n << (E + 1n)) - 1n)}</b>.`) +
+      csLine(`This place is worth exactly 1 more than all the smaller places added together (${csN(val - 1n)} + 1 = ${csN(val)}).`) +
+      (CS_BIG_NOTES[e] ? csLine(CS_BIG_NOTES[e]) : ''));
+  return csDetail(e, `Bit ${e}`, `${csPow(2, e)} = ${csComma(val)}`, secs);
+}
+// A place value of the octal (8) or hexadecimal (16) system: 8^k or 16^k.
+function csPlaceDetailBase(base, k){
+  const B = BigInt(base), val = B ** BigInt(k), bpd = base === 8 ? 3 : 4, name = base === 8 ? 'octal' : 'hexadecimal', Name = name[0].toUpperCase() + name.slice(1);
+  const top = base === 8 ? 5 : 10, midD = base === 8 ? 3 : 12, low = base === 8 ? 7 : 15;
+  const digs = Array(k + 1).fill(0);
+  digs[k] = top; if(k >= 2) digs[Math.floor(k / 2)] = midD; if(k >= 1) digs[0] = low;
+  const s = digs.slice().reverse().map(csDigit).join('');
+  const terms = []; digs.forEach((d, i) => { if(d) terms.push({ d, w: B ** BigInt(i) }); });
+  terms.reverse();
+  const total = terms.reduce((a, t) => a + BigInt(t.d) * t.w, 0n);
+  const parts = s.split('').map(ch => parseInt(ch, base).toString(2).padStart(bpd, '0'));
+  const lab = t => `${csDigit(t.d)}${t.d > 9 ? ' (' + t.d + ')' : ''} \u00D7 ${csN(t.w)}`;
+  const secs =
+    csSec('What it means', csLine(`Each 1 in this place is worth <b>${csComma(val)}</b>. A digit <b>d</b> here adds d \u00D7 ${csComma(val)}.`) +
+      csLine(`It is the <b>${csOrd(k + 1)}</b> place from the right.`) +
+      csLine(`Because ${base} = ${csPow(2, bpd)}, the value ${csPow(base, k)} is the same as <b>${csPow(2, bpd * k)}</b> = ${csComma(val)}.`) +
+      csLine(k ? `Every place is ${base} times the one before it: ${csComma(val / B)} \u00D7 ${base} = ${csComma(val)}.` : 'The first place is always worth 1.')) +
+    csSec(`${Name} \u2192 Decimal example`, csLine(`${Name} <b>${s}</b>`) + csLine(`${terms.map(lab).join(' + ')}`) +
+      csLine(`${terms.map(t => csN(BigInt(t.d) * t.w)).join(' + ')}${terms.length > 1 ? ' = ' : ' = '}<b>${csN(total)}</b>`) + csLine('Zeros add nothing, so only the non-zero digits are listed.')) +
+    csSec(`${Name} \u2192 Binary example`, csLine(`${Name} <b>${s}</b>: every digit becomes ${bpd} bits.`) + csLine(`${parts.join(' ')}`) +
+      csLine(`Join them: <b>${csGroup(parts.join(''), 4)}</b>`)) +
+    csSec('Good to know', csLine(`The biggest number with ${k + 1} ${name} digit${k ? 's' : ''} is ${csPow(base, k + 1)} \u2212 1 = <b>${csComma(val * B - 1n)}</b>.`) +
+      csLine(`${k + 1} ${name} digit${k ? 's' : ''} use exactly ${bpd * (k + 1)} bits.`));
+  return csDetail(k, csPow(base, k), `= ${csComma(val)}`, secs);
+}
+function csPlaceDetail(e){ return e < 8 ? csPlaceDetailSmall(e) : csPlaceDetailBig(e); }
+
+/* ----- Explore tab: digits or place values, shown a page (a byte) at a time ----- */
+function csExploreModel(kind, mode){
+  if(mode === 'digits'){
+    const base = kind === 'oct' ? 8 : 16, bits = kind === 'oct' ? 3 : 4;
+    return { base, count:base, per:base, place:false,
+      tile: i => ({ main:csDigit(i), sub:csBits(i, bits), title:`${i} = ${csBits(i, bits)}` }),
+      hint:`Tap a digit to see its ${bits}-bit pattern, with examples both ways.`,
+      detail: i => kind === 'oct' ? csOctDetail(i) : csHexDetail(i) };
+  }
+  const base = kind === 'place' ? 2 : kind === 'oct' ? 8 : 16, count = kind === 'place' ? 64 : kind === 'oct' ? 22 : 16;
+  return { base, count, per:8, place:true,
+    tile: e => { const v = BigInt(base) ** BigInt(e); return { main:csShortVal(v), sub:`${base}<sup>${e}</sup>`, title:csComma(v) }; },
+    hint: kind === 'place' ? 'Tap a place value to see what it means, with examples. Use the Byte buttons to go past 128, all the way to 2\u2076\u00B3.'
+        : `Tap a place value to see what it means. Place values of ${kind === 'oct' ? 'octal are powers of 8' : 'hexadecimal are powers of 16'}.`,
+    detail: e => base === 2 ? csPlaceDetail(e) : csPlaceDetailBase(base, e) };
+}
+function csExploreInner(kind, mode, page){
+  const M = csExploreModel(kind, mode), pages = Math.ceil(M.count / M.per), from = page * M.per, to = Math.min(M.count, from + M.per);
+  let tiles = '';
+  for(let i = from; i < to; i++){
+    const t = M.tile(i), cls = t.main.length > 11 ? 'xlong' : t.main.length > 7 ? 'long' : '';
+    tiles += `<button type="button" class="cs-tile ${cls}" data-i="${i}" title="${t.title}" aria-pressed="false" onclick="csExplorePick(this)"><b>${t.main}</b><span>${t.sub}</span></button>`;
+  }
+  let chips = '', head = '';
+  if(M.place){
+    const lo = BigInt(M.base) ** BigInt(from), hi = BigInt(M.base) ** BigInt(to - 1);
+    if(pages > 1) chips = Array.from({ length:pages }, (_, p) => {
+      const f = p * M.per, t = Math.min(M.count, f + M.per) - 1;
+      return `<button type="button" class="cs-base ${p === page ? 'on' : ''}" data-page="${p}" aria-pressed="${p === page}" onclick="csExplorePage(this)">${M.base === 2 ? 'Byte ' + (p + 1) : csPow(M.base, f) + '\u2013' + csPow(M.base, t)}</button>`;
+    }).join('');
+    head = (M.base === 2 ? `Byte ${page + 1} \u00B7 bits ${from} to ${to - 1} \u00B7 ` : '') +
+      `place values ${csPow(M.base, from)} to ${csPow(M.base, to - 1)} (${csShortVal(lo)} to ${csShortVal(hi)})`;
+  }
+  return { hint:`<span aria-hidden="true">\uD83D\uDC46</span> ${M.hint}`, chips, head, tiles };
+}
+function csExploreFrame(kind){
+  const mode = kind === 'place' ? 'place' : 'digits', I = csExploreInner(kind, mode, 0);
+  const modes = kind === 'place' ? '' : `<div class="cs-bases cs-modes" role="group" aria-label="What to explore">
+      <button type="button" class="cs-base on" data-mode="digits" aria-pressed="true" onclick="csExploreMode(this)">Digits</button>
+      <button type="button" class="cs-base" data-mode="place" aria-pressed="false" onclick="csExploreMode(this)">Place values</button></div>`;
+  return `<div class="cs-explore" data-mode="${mode}" data-page="0">${modes}
+    <p class="cs-hint">${I.hint}</p>
+    <div class="cs-bases cs-pages" role="group" aria-label="Pages of place values">${I.chips}</div>
+    <div class="cs-pagehead">${I.head}</div>
+    <div class="cs-tiles cs-tiles-8">${I.tiles}</div>
+    <div class="cs-details" aria-live="polite"></div>
+  </div>`;
+}
+function csExploreRedraw(box){
+  const kind = box.closest('.cheat').dataset.kind, I = csExploreInner(kind, box.dataset.mode, +box.dataset.page);
+  box.querySelector('.cs-hint').innerHTML = I.hint;
+  box.querySelector('.cs-pages').innerHTML = I.chips;
+  box.querySelector('.cs-pagehead').innerHTML = I.head;
+  box.querySelector('.cs-tiles').innerHTML = I.tiles;
+  box.querySelector('.cs-details').innerHTML = '';
+  box.closest('.cs-pane').classList.remove('has-open');
+}
+function csExploreMode(btn){
+  const box = btn.closest('.cs-explore'); box.dataset.mode = btn.dataset.mode; box.dataset.page = 0;
+  box.querySelectorAll('.cs-modes .cs-base').forEach(b => { const on = b === btn; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  csExploreRedraw(box);
+}
+function csExplorePage(btn){ const box = btn.closest('.cs-explore'); box.dataset.page = btn.dataset.page; csExploreRedraw(box); }
+function csExplorePick(btn){
+  const box = btn.closest('.cs-explore'), kind = btn.closest('.cheat').dataset.kind, i = +btn.dataset.i, was = btn.classList.contains('on');
+  box.querySelectorAll('.cs-tile').forEach(t => { t.classList.remove('on'); t.setAttribute('aria-pressed', 'false'); });
+  const host = box.querySelector('.cs-details'); host.innerHTML = '';
+  btn.closest('.cs-pane').classList.toggle('has-open', !was);
+  if(was) return;
+  btn.classList.add('on'); btn.setAttribute('aria-pressed', 'true');
+  host.innerHTML = csExploreModel(kind, box.dataset.mode).detail(i);
+  const d = host.querySelector('.cs-detail');
+  if(d){ d.hidden = false; try{ d.scrollIntoView({ block:'nearest', behavior: skReducedMotion() ? 'auto' : 'smooth' }); }catch(_){} }
+}
+
+/* ----- Flip the bits: 8, 16, 32 or 64 bits, one byte per row ----- */
+const CS_FLIP = {
+  place:{ widths:[8, 16, 32, 64], row:8, group:4, base:0 },
+  hex:  { widths:[8, 16, 32, 64], row:8, group:4, base:16 },
+  oct:  { widths:[9, 18, 36, 63], row:9, group:3, base:8 }
+};
+function csFlipGrid(kind, w){
+  const C = CS_FLIP[kind], rows = Math.ceil(w / C.row);
+  let html = '';
+  for(let r = rows - 1; r >= 0; r--){
+    let groups = '';
+    for(let g = C.row / C.group - 1; g >= 0; g--){
+      const gi = r * (C.row / C.group) + g;
+      let bits = '';
+      for(let j = C.group - 1; j >= 0; j--){
+        const i = gi * C.group + j;
+        let label;
+        if(kind === 'place'){
+          const v = 1n << BigInt(i);
+          label = `<span class="w-full">${csComma(v)}</span><span class="w-pow">2<sup>${i}</sup></span>`;
+        } else label = `<span class="w-full w-local">${1 << j}</span>`;
+        const big = kind === 'place' ? `${i >= 27 ? ' b-d' : ''}${i >= 14 ? ' b-m' : ''}` : '';
+        bits += `<button type="button" class="cs-bit${big}" data-i="${i}" aria-pressed="false" aria-label="Bit ${i}, currently 0" onclick="csBitFlip(this)">${label}<b>0</b></button>`;
+      }
+      groups += `<div class="cs-fgroup"><div class="cs-fbits" style="--n:${C.group}">${bits}</div>${C.base ? `<span class="cs-fdigit" data-g="${gi}">0</span>` : ''}</div>`;
+    }
+    const lab = kind === 'oct' ? `Digits ${r * 3 + 1}\u2013${r * 3 + 3}` : `Byte ${r + 1}`;
+    html += `<div class="cs-frow"><span class="cs-frow-l">${lab}</span><div class="cs-fgroups">${groups}</div></div>`;
+  }
+  return html;
+}
+function csBitsPane(kind){
+  const C = CS_FLIP[kind];
+  const chips = C.widths.map((w, i) => `<button type="button" class="cs-base ${i === 0 ? 'on' : ''}" data-w="${w}" aria-pressed="${i === 0}" onclick="csFlipWidth(this)">${w} bits<small>${kind === 'oct' ? w / 3 + ' digits' : w / 8 + (w === 8 ? ' byte' : ' bytes')}</small></button>`).join('');
+  const dName = kind === 'hex' ? 'hex' : 'octal';
+  const intro = C.base ? `Tap a bit to turn it on or off. Every group of ${C.group} bits is one ${dName} digit, shown underneath.` : 'Tap a bit to turn it on or off and watch the number change. Choose more bits to go past 255.';
+  return `<div class="cs-flip" data-kind="${kind}" data-w="${C.widths[0]}" data-v="0">
+    <h6>\uD83D\uDD79\uFE0F Flip the bits</h6>
+    <p class="cs-conv-intro">${intro}</p>
+    <div class="cs-bases cs-fwidths" role="group" aria-label="How many bits">${chips}</div>
+    <div class="cs-fgrid">${csFlipGrid(kind, C.widths[0])}</div>
+    <div class="cs-bitsum" aria-live="polite">0</div>
+    <div class="cs-bitouts">
+      <div><span>Decimal</span><b data-bo="10">0</b></div><div><span>Octal</span><b data-bo="8">0</b></div><div><span>Hex</span><b data-bo="16">0</b></div><div class="cs-bo-wide"><span>Binary</span><b data-bo="2">0</b></div>
+    </div>
+    <div class="cs-qactions">
+      <button type="button" class="cs-qbtn" onclick="csBitSet(this, 'zero')">Clear</button>
+      <button type="button" class="cs-qbtn" onclick="csBitSet(this, 'ones')">All ones</button>
+      <button type="button" class="cs-qbtn" onclick="csBitSet(this, 'rand')">Random</button>
+      <button type="button" class="cs-qbtn go" onclick="csBitSend(this)">Send to converter \u2191</button>
+    </div>
+  </div>`;
+}
+function csFlipSum(v, w){
+  const on = []; for(let i = w - 1; i >= 0; i--) if((v >> BigInt(i)) & 1n) on.push(1n << BigInt(i));
+  if(!on.length) return '0';
+  if(on.length === 1) return csComma(v);
+  return on.length <= 6 ? `${on.map(csComma).join(' + ')} = ${csComma(v)}` : `${on.length} bits are on = ${csComma(v)}`;
+}
+function csBitPaint(root, v){
+  const w = +root.dataset.w, kind = root.dataset.kind, C = CS_FLIP[kind];
+  root.dataset.v = v.toString();
+  root.querySelectorAll('.cs-bit').forEach(b => {
+    const i = +b.dataset.i, on = ((v >> BigInt(i)) & 1n) === 1n;
+    b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); b.querySelector('b').textContent = on ? '1' : '0';
+    b.setAttribute('aria-label', `Bit ${i}, currently ${on ? 1 : 0}`);
+  });
+  if(C.base){
+    const mask = (1n << BigInt(C.group)) - 1n;
+    root.querySelectorAll('.cs-fdigit').forEach(d => { d.textContent = ((v >> BigInt(+d.dataset.g * C.group)) & mask).toString(C.base).toUpperCase(); });
+  }
+  root.querySelector('.cs-bitsum').textContent = csFlipSum(v, w);
+  const bin = v.toString(2).padStart(w, '0');
+  const set = (b, s) => { const el = root.querySelector(`[data-bo="${b}"]`); if(el) el.textContent = s; };
+  set(10, csComma(v));
+  set(8, v.toString(8).padStart(kind === 'oct' ? w / 3 : 1, '0'));
+  set(16, v.toString(16).toUpperCase().padStart(kind === 'oct' ? 1 : w / 4, '0'));
+  set(2, csGroup(bin, kind === 'oct' ? 3 : 4));
+}
+function csBitFlip(btn){ const root = btn.closest('.cs-flip'); csBitPaint(root, BigInt(root.dataset.v) ^ (1n << BigInt(btn.dataset.i))); }
+function csBitSet(btn, mode){
+  const root = btn.closest('.cs-flip'), w = +root.dataset.w;
+  let v = 0n;
+  if(mode === 'ones') v = (1n << BigInt(w)) - 1n;
+  else if(mode === 'rand'){ let s = ''; for(let i = 0; i < w; i++) s += Math.random() < 0.5 ? '0' : '1'; v = BigInt('0b' + s); }
+  csBitPaint(root, v);
+}
+function csFlipWidth(btn){
+  const root = btn.closest('.cs-flip'), w = +btn.dataset.w, kind = root.dataset.kind;
+  root.querySelectorAll('.cs-fwidths .cs-base').forEach(b => { const on = b === btn; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  root.dataset.w = w;
+  root.querySelector('.cs-fgrid').innerHTML = csFlipGrid(kind, w);
+  csBitPaint(root, BigInt(root.dataset.v) & ((1n << BigInt(w)) - 1n));
+}
+function csBitSend(btn){
+  const flip = btn.closest('.cs-flip'), conv = flip.closest('.cs-pane').querySelector('.cs-conv'), inp = conv.querySelector('.cs-conv-in');
+  conv.dataset.base = 2; inp.value = BigInt(flip.dataset.v).toString(2).padStart(+flip.dataset.w, '0');
+  conv.querySelectorAll('.cs-base').forEach(b => { const on = +b.dataset.base === 2; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+  csConvRun(conv);
+  try{ conv.scrollIntoView({ block:'nearest', behavior: skReducedMotion() ? 'auto' : 'smooth' }); }catch(_){}
+}
+
+/* ----- Whole cheat sheet ----- */
+function renderCheat(topic){
+  const kind = topic.lesson.ref;
+  const ck = topic.ck || topic.key;
+  const item = CONV_GROUPS.flatMap(g => g.items).find(x => ck === x.k || ck.endsWith('-' + x.k));
+  const opKey = (ck.split('-')[0]), op = ARITH[opKey] ? opKey : null;
+  const title = kind === 'place' ? 'Place values of a binary number' : kind === 'oct' ? 'Octal: digits and place values' : 'Hexadecimal: digits and place values';
+  const tabs = [
+    { id:'explore', icon:'\uD83D\uDD0D', label:'Explore' },
+    ...(op ? [{ id:'op', icon:ARITH[op].sym, label:ARITH[op].name }] : []),
+    { id:'examples', icon:'\uD83D\uDCDD', label:'More examples' },
+    { id:'quiz', icon:'\uD83C\uDFAF', label:'Practice' },
+    { id:'facts', icon:'\uD83D\uDCDA', label:'Quick facts' },
+    { id:'conv', icon:'\uD83E\uDDEE', label:'Converter' }
+  ];
+  const tabBtns = tabs.map((t, i) => `<button type="button" role="tab" class="cs-tab ${i === 0 ? 'on' : ''}" data-tab="${t.id}" aria-selected="${i === 0}" onclick="csTab(this)"><span aria-hidden="true">${t.icon}</span> ${t.label}</button>`).join('');
+  return `
+    <div class="cheat" data-kind="${kind}">
+      <div class="cs-head"><span class="cs-badge" aria-hidden="true">\uD83D\uDCD2</span><div><div class="game-eyebrow">Cheat sheet</div><h4 class="cs-title">${title}</h4></div></div>
+      <div class="cs-tabs" role="tablist">${tabBtns}</div>
+      <div class="cs-pane" data-pane="explore" role="tabpanel">${csExploreFrame(kind)}</div>
+      ${op ? `<div class="cs-pane" data-pane="op" role="tabpanel" hidden>${csOpPane(op, item ? item.from : 2)}</div>` : ''}
+      <div class="cs-pane" data-pane="examples" role="tabpanel" hidden>${csExamplesPane(kind)}</div>
+      <div class="cs-pane" data-pane="quiz" role="tabpanel" hidden>${csQuizPane()}</div>
+      <div class="cs-pane" data-pane="facts" role="tabpanel" hidden>${csFactsPane(kind, item)}</div>
+      <div class="cs-pane" data-pane="conv" role="tabpanel" hidden>${csConvPane(item ? item.from : 2, kind)}</div>
+    </div>`;
+}
+function csTab(btn){
+  const root = btn.closest('.cheat');
+  root.querySelectorAll('.cs-tab').forEach(t => { const on = t === btn; t.classList.toggle('on', on); t.setAttribute('aria-selected', on); });
+  root.querySelectorAll('.cs-pane').forEach(p => { p.hidden = p.dataset.pane !== btn.dataset.tab; });
+  if(btn.dataset.tab === 'conv') csConvRun(root.querySelector('.cs-conv'));
+  if(btn.dataset.tab === 'quiz'){ const qz = root.querySelector('.cs-quiz'); if(qz && qz.dataset.ready !== '1') csQuizNew(qz); }
+}
+
+function renderLesson(topic){
+  const L = topic.lesson;
+  const steps = L.steps.map((t, i) => `<li><span class="ls-num">${i + 1}</span><span>${escapeHtml(t)}</span></li>`).join('');
+  const lines = L.exLines.map(t => `<div class="ex-line">${escapeHtml(t)}</div>`).join('');
+  return `
+    <div class="lesson-card">
+      <div class="lesson-head">
+        <span class="lesson-badge">📘</span>
+        <div>
+          <div class="game-eyebrow">Quick lesson</div>
+          <h3 class="game-title">${escapeHtml(L.title)}</h3>
+        </div>
+      </div>
+      <div class="lesson-idea">${escapeHtml(L.idea)}</div>
+      <div class="lesson-cols">
+        <div class="lesson-panel">
+          <h5>Steps</h5>
+          <ol class="ls-steps">${steps}</ol>
+        </div>
+        <div class="lesson-panel lesson-example">
+          <h5>${escapeHtml(L.exTitle)}</h5>
+          ${lines}
+          <div class="ex-answer">✅ ${escapeHtml(L.exAnswer)}</div>
+        </div>
+      </div>
+      ${renderCheat(topic)}
+      <div class="lesson-tip"><span>💡</span><p>${escapeHtml(L.tip)}</p></div>
+    </div>`;
 }
 
 /* ================= ACTIVITY LOG + ADMIN DASHBOARD ================= */
@@ -1089,24 +2236,24 @@ function logActivity(type, detail, extra){
   if(!currentUser) return;
   const userRef = db.collection('users').doc(currentUser.uid);
   userRef.collection('activity').add(Object.assign({
-    type, detail: detail || '', at: firebase.firestore.FieldValue.serverTimestamp()
+    type, detail: detail || '', classSection: classSection || null, at: firebase.firestore.FieldValue.serverTimestamp()
   }, extra || {})).catch(console.error);
   userRef.set({lastSeenAt: Date.now()}, {merge:true}).catch(console.error);
 }
 
-// Only REAL activity is recorded: a student starting the mini game in a section + level.
-// Opening a lesson page or replaying the same section/level within 10 minutes is not logged again,
-// so the admin board is not flooded with repeats.
+// Only REAL activity is recorded: a student checking their first answer in a mini game (and, when a game has
+// difficulty levels, the level they picked). Opening a lesson page or replaying the same section within
+// 10 minutes is not logged again, so the admin board is not flooded with repeats.
 const GAME_LOG_COOLDOWN_MS = 10 * 60 * 1000;
 const recentGameLogs = {};
 function logGamePlay(section, levelKey){
   if(!currentUser) return;
-  const key = currentUser.uid + '|' + section + '|' + levelKey;
+  const key = currentUser.uid + '|' + section + '|' + (levelKey || 'all');
   const now = Date.now();
   if(recentGameLogs[key] && now - recentGameLogs[key] < GAME_LOG_COOLDOWN_MS) return;
   recentGameLogs[key] = now;
-  const levelLabel = (typeof GAME_LEVELS !== 'undefined' && GAME_LEVELS[levelKey]) ? GAME_LEVELS[levelKey].label : levelKey;
-  logActivity('game_played', `${section} \u00B7 ${levelLabel}`, { section, level: levelKey });
+  const levelLabel = levelKey ? ((typeof GAME_LEVELS !== 'undefined' && GAME_LEVELS[levelKey]) ? GAME_LEVELS[levelKey].label : levelKey) : '';
+  logActivity('game_played', levelLabel ? `${section} \u00B7 ${levelLabel}` : section, { section, level: levelKey || 'all' });
 }
 
 // Shows/hides the Admin tab. This only controls what's VISIBLE — the real protection
@@ -1124,189 +2271,127 @@ function formatWhen(ms){
 }
 
 function describeActivity(a){
+  if(a.type === 'game_played') return `played <b>${escapeHtml(a.detail || 'a mini game')}</b>`;
+  if(a.type === 'class_selected') return `chose class section <b>${escapeHtml(a.detail)}</b>`;
   if(a.type === 'topic_opened') return `opened the ${escapeHtml(a.detail)} lesson`;
-  return escapeHtml(a.type);
+  return escapeHtml(a.type || 'did something');
 }
 
-/* ================= SECTIONS (profile picker + admin grouping) ================= */
-// Section list: grouped by strand, colours follow the school's section chart.
-const SECTION_STRANDS = [
-  { id:'medical',     name:'Medical Sciences', emoji:'🩺', color:'#1C8F52', dark:'#126B3A', tint:'#E2F5EA', ink:'#FFFFFF', lightText:true,
-    sections:[ {id:'medical-sciences', label:'11 - Medical Sciences'} ] },
-  { id:'engineering', name:'Engineering',      emoji:'⚙️', color:'#A3D44F', dark:'#7FAE2E', tint:'#F1F9E1', ink:'#20330C', lightText:false,
-    sections:[ {id:'engineering-1', label:'11 - Engineering 1'}, {id:'engineering-2', label:'11 - Engineering 2'} ] },
-  { id:'humanities',  name:'Humanities',       emoji:'📚', color:'#5E6EE6', dark:'#4553C4', tint:'#ECEEFF', ink:'#FFFFFF', lightText:true,
-    sections:[ {id:'humanities-1', label:'11 - Humanities 1'}, {id:'humanities-2', label:'11 - Humanities 2'} ] },
-  { id:'social',      name:'Social Science',   emoji:'🌍', color:'#8E5CE0', dark:'#6F42BF', tint:'#F2EAFF', ink:'#FFFFFF', lightText:true,
-    sections:[ {id:'social-science-1', label:'11 - Social Science 1'}, {id:'social-science-2', label:'11 - Social Science 2'} ] },
-  { id:'ict',         name:'ICT',              emoji:'💻', color:'#F7A998', dark:'#DC8470', tint:'#FFEEE9', ink:'#4A1D12', lightText:false,
-    sections:[ {id:'ict-1', label:'11 - ICT 1'}, {id:'ict-2', label:'11 - ICT 2'} ] },
-  { id:'fcs',         name:'FCS',              emoji:'🍳', color:'#F7D26B', dark:'#D9AE3C', tint:'#FFF7DC', ink:'#4A3808', lightText:false,
-    sections:[ {id:'fcs-1', label:'11 - FCS 1'}, {id:'fcs-2', label:'11 - FCS 2'} ] }
-];
-const SECTIONS = SECTION_STRANDS.flatMap(g => g.sections.map(s => ({ ...s, strand:g })));
-const SECTION_BY_ID = Object.fromEntries(SECTIONS.map(s => [s.id, s]));
-function secVars(g){ return `--sc:${g.color}; --sd:${g.dark}; --st:${g.tint}; --si:${g.ink};`; }
+// ----- Admin: students grouped by class section (ICT - A, ICT - B) -----
+const ADMIN_NONE = '__none';
+let adminStudents = [], adminFilter = 'all';
 
-let secStatusTimer = null;
-function setSecStatus(text, kind){
-  const el = document.getElementById('secStatus'); if(!el) return;
-  clearTimeout(secStatusTimer);
-  el.className = 'sec-status' + (text ? ' show ' + (kind || 'ok') : '');
-  el.textContent = text || '';
-  if(text && kind !== 'err') secStatusTimer = setTimeout(() => { el.className = 'sec-status'; }, 4200);
+// Which admin group a student belongs to. Anyone without a valid class section is "No section yet".
+function adminKey(s){ return CLASS_SECTIONS.indexOf(s.classSection) >= 0 ? s.classSection : ADMIN_NONE; }
+function adminInSection(key){ return key === 'all' ? adminStudents : adminStudents.filter(s => adminKey(s) === key); }
+function adminLabel(key){ return key === 'all' ? 'All students' : key === ADMIN_NONE ? 'No section yet' : key; }
+
+function setAdminSection(key){ adminFilter = key; renderAdmin(); }
+
+function toggleAdminStudent(id){
+  const row = document.querySelector(`tr.adm-row[data-id="${CSS.escape(id)}"]`), det = document.querySelector(`tr.adm-detail[data-for="${CSS.escape(id)}"]`);
+  if(!row || !det) return;
+  const open = det.hidden;
+  det.hidden = !open; row.classList.toggle('open', open); row.setAttribute('aria-expanded', open);
 }
 
-// Draws the section buttons on the Profile tab, plus the badge and the Home reminder.
-function renderSectionPicker(popId){
-  const host = document.getElementById('secGroups'); if(!host) return;
-  const signedIn = !!currentUser;
-  const cur = signedIn ? (currentUser.section || '') : '';
-  host.innerHTML = SECTION_STRANDS.map(g => `
-    <div class="sec-group" style="${secVars(g)}">
-      <div class="sec-group-name"><i></i><span>${g.emoji} ${escapeHtml(g.name)}</span></div>
-      <div class="sec-opts">
-        ${g.sections.map(s => `<button type="button" class="sec-btn${cur === s.id ? ' selected' : ''}${popId === s.id ? ' pop' : ''}"
-            data-sec="${s.id}" onclick="selectSection('${s.id}')" ${signedIn ? '' : 'disabled'} aria-pressed="${cur === s.id}">
-            <span class="sec-btn-dot"></span>
-            <span class="sec-btn-label">${escapeHtml(s.label)}</span>
-            <svg class="sec-check" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>`).join('')}
-      </div>
-    </div>`).join('');
+function renderAdmin(){
+  const now = Date.now(), dayAgo = now - 24*60*60*1000, weekAgo = now - 7*24*60*60*1000;
+  if(adminFilter === ADMIN_NONE && !adminInSection(ADMIN_NONE).length) adminFilter = 'all';
 
-  const hint = document.getElementById('secHint');
-  if(hint){
-    hint.textContent = !signedIn ? 'Sign in with Google to choose your section.'
-      : cur ? `You are in ${SECTION_BY_ID[cur].label}. Tap another section if you need to switch.`
-            : 'Tap the section you belong to. Your teacher will see you in that group.';
-  }
-  const count = document.getElementById('secCount');
-  if(count) count.textContent = cur ? '' : (signedIn ? 'Not chosen yet' : '');
-  const clr = document.getElementById('secClearBtn'); if(clr) clr.hidden = !cur;
+  // section cards (All, ICT - A, ICT - B, and "No section yet" when somebody has not picked)
+  const cards = [{ key:'all', icon:'\uD83D\uDC65' }, ...CLASS_SECTIONS.map(s => ({ key:s, icon:'\uD83C\uDFEB' }))];
+  if(adminInSection(ADMIN_NONE).length) cards.push({ key:ADMIN_NONE, icon:'\u2754' });
+  document.getElementById('adminSections').innerHTML = cards.map(c => {
+    const list = adminInSection(c.key), act = list.filter(s => s.lastActive > dayAgo).length, on = c.key === adminFilter;
+    return `<button type="button" class="adm-sec ${on ? 'on' : ''}" data-key="${escapeHtml(c.key)}" aria-pressed="${on}" onclick="setAdminSection(this.dataset.key)">
+      <span class="adm-sec-ico" aria-hidden="true">${c.icon}</span>
+      <span class="adm-sec-body"><b>${escapeHtml(adminLabel(c.key))}</b><span>${list.length} student${list.length === 1 ? '' : 's'} \u00B7 ${act} active today</span></span>
+    </button>`;
+  }).join('');
 
-  const badge = document.getElementById('profileSectionBadge');
-  if(badge){
-    if(cur){
-      const s = SECTION_BY_ID[cur];
-      badge.hidden = false; badge.setAttribute('style', secVars(s.strand));
-      badge.textContent = `${s.strand.emoji} ${s.label}`;
-    } else badge.hidden = true;
-  }
-  const banner = document.getElementById('secBanner');
-  if(banner) banner.style.display = (signedIn && !cur) ? 'flex' : 'none';
+  const list = adminInSection(adminFilter), title = adminFilter === 'all' ? '' : ` \u00B7 ${adminLabel(adminFilter)}`;
+  document.getElementById('adminStudentCount').textContent = `${adminStudents.length} student${adminStudents.length === 1 ? '' : 's'} in total`;
+  document.getElementById('adminTotalStudents').textContent = list.length;
+  document.getElementById('adminActiveToday').textContent = list.filter(s => s.lastActive > dayAgo).length;
+  document.getElementById('adminActiveWeek').textContent = list.filter(s => s.lastActive > weekAgo).length;
+  document.getElementById('adminGamesPlayed').textContent = list.reduce((n, s) => n + s.games, 0);
+  document.getElementById('adminStudentsTitle').textContent = `Students${title}`;
+  document.getElementById('adminFeedTitle').textContent = `Recent activity${title}`;
+
+  const showSec = adminFilter === 'all';
+  document.getElementById('adminStudentRows').innerHTML = list.length
+    ? list.map(s => {
+        const events = s.activity.slice(0, 15).map(a => `<div class="adm-ev"><span class="adm-ev-t">${formatWhen(a.ms)}</span><span>${describeActivity(a)}</span></div>`).join('');
+        const id = escapeHtml(s.id);
+        return `<tr class="adm-row" data-id="${id}" tabindex="0" role="button" aria-expanded="false" title="Click to see recent activity" onclick="toggleAdminStudent(this.dataset.id)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAdminStudent(this.dataset.id);}">
+          <td><span class="adm-caret" aria-hidden="true">\u25B8</span> ${escapeHtml(s.name)}</td>
+          <td>${escapeHtml(s.email)}</td>
+          <td>${adminKey(s) === ADMIN_NONE ? '<span class="adm-badge none">Not set</span>' : `<span class="adm-badge">${escapeHtml(s.classSection)}</span>`}</td>
+          <td>${escapeHtml(s.level)}</td>
+          <td>${s.streak} \uD83D\uDD25</td>
+          <td>${s.games}</td>
+          <td>${formatWhen(s.lastActive)}</td>
+        </tr>
+        <tr class="adm-detail" data-for="${id}" hidden><td colspan="7"><div class="adm-events">${events || '<span class="admin-intro" style="margin:0;">No activity recorded yet.</span>'}</div></td></tr>`;
+      }).join('')
+    : `<tr><td colspan="7">${adminFilter === 'all' ? 'No students yet.' : `No students in ${escapeHtml(adminLabel(adminFilter))} yet.`}</td></tr>`;
+
+  // One row per student (name shown once). Only mini-game plays count; repeats are merged into "x2".
+  const feed = list.map(s => {
+    const plays = s.activity.filter(a => a.type === 'game_played').sort((x, y) => y.ms - x.ms);
+    if(!plays.length) return null;
+    const counts = new Map();                       // keeps most-recent-first order
+    plays.forEach(p => { const k = p.detail || 'Mini game'; counts.set(k, (counts.get(k) || 0) + 1); });
+    return { student: s.name, sec: adminKey(s) === ADMIN_NONE ? '' : s.classSection, ms: plays[0].ms, items: [...counts.entries()] };
+  }).filter(Boolean).sort((x, y) => y.ms - x.ms).slice(0, 20);
+
+  document.getElementById('adminActivityList').innerHTML = feed.length
+    ? feed.map(r => `<div class="admin-activity-row">
+        <span class="aa-time">${formatWhen(r.ms)}</span>
+        <span class="aa-body"><strong>${escapeHtml(r.student)}</strong>${showSec && r.sec ? ` <span class="adm-badge">${escapeHtml(r.sec)}</span>` : ''} played
+          ${r.items.map(([label, n]) => `<span class="aa-chip">${escapeHtml(label)}${n > 1 ? ` <b>\u00D7${n}</b>` : ''}</span>`).join('')}
+        </span>
+      </div>`).join('')
+    : `<p class="admin-intro">No activity recorded yet${adminFilter === 'all' ? '' : ` for ${escapeHtml(adminLabel(adminFilter))}`}. It appears when students play the mini game.</p>`;
 }
-
-// small burst of sparkles from the button that was just chosen
-function secBurst(id){
-  const btn = document.querySelector(`.sec-btn[data-sec="${id}"]`); if(!btn) return;
-  for(let i = 0; i < 10; i++){
-    const sp = document.createElement('span');
-    const ang = (Math.PI * 2 * i) / 10 + Math.random() * .4, dist = 34 + Math.random() * 26;
-    sp.className = 'sec-spark';
-    sp.style.setProperty('--dx', Math.cos(ang) * dist + 'px');
-    sp.style.setProperty('--dy', Math.sin(ang) * dist + 'px');
-    btn.appendChild(sp);
-    setTimeout(() => sp.remove(), 800);
-  }
-}
-
-async function selectSection(id){
-  const sec = SECTION_BY_ID[id];
-  if(!sec) return;
-  if(!currentUser){ setSecStatus('Please sign in with Google first.', 'err'); return; }
-  if(currentUser.section === id) return;
-  const previous = currentUser.section || '';
-  currentUser.section = id;
-  renderSectionPicker(id);
-  secBurst(id);
-  try{
-    await db.collection('users').doc(currentUser.uid).set(
-      { section: id, sectionLabel: sec.label, sectionUpdatedAt: Date.now() }, { merge:true });
-    setSecStatus(`Saved! You're now in ${sec.label}.`, 'ok');
-  }catch(err){
-    console.error(err);
-    currentUser.section = previous;
-    renderSectionPicker();
-    setSecStatus("Couldn't save your section. Check your connection and try again.", 'err');
-  }
-}
-
-async function clearSection(){
-  if(!currentUser || !currentUser.section) return;
-  const previous = currentUser.section;
-  currentUser.section = '';
-  renderSectionPicker();
-  try{
-    await db.collection('users').doc(currentUser.uid).set(
-      { section: firebase.firestore.FieldValue.delete(), sectionLabel: firebase.firestore.FieldValue.delete() }, { merge:true });
-    setSecStatus('Your section was removed.', 'info');
-  }catch(err){
-    console.error(err);
-    currentUser.section = previous;
-    renderSectionPicker();
-    setSecStatus("Couldn't remove your section. Please try again.", 'err');
-  }
-}
-renderSectionPicker();
-
-/* ---------- ADMIN: students grouped by section ---------- */
-function timeAgo(ms){
-  if(!ms) return 'never';
-  const s = Math.max(0, (Date.now() - ms) / 1000);
-  if(s < 60) return 'just now';
-  if(s < 3600) return Math.floor(s / 60) + 'm ago';
-  if(s < 86400) return Math.floor(s / 3600) + 'h ago';
-  if(s < 172800) return 'yesterday';
-  if(s < 2592000) return Math.floor(s / 86400) + 'd ago';
-  return new Date(ms).toLocaleDateString(undefined, {month:'short', day:'numeric'});
-}
-
-let adminData = { students: [] };
-let adminFilter = 'all';
-const adminCollapsed = new Set();
 
 async function loadAdminDashboard(){
   if(!currentUser || currentUser.email !== ADMIN_EMAIL) return;
+
   const loading = document.getElementById('adminLoadingMsg');
-  loading.style.display = 'block'; loading.style.color = ''; loading.textContent = 'Loading student data...';
+  const table = document.getElementById('adminStudentTable');
+  loading.style.display = 'block';
+  loading.style.color = '';
+  loading.textContent = 'Loading student data...';
+  table.style.display = 'none';
 
   try{
     const usersSnap = await db.collection('users').get();
+
     const students = await Promise.all(usersSnap.docs.map(async doc=>{
       const u = doc.data();
-      const activitySnap = await db.collection('users').doc(doc.id).collection('activity').orderBy('at', 'desc').limit(40).get();
+      const userRef = db.collection('users').doc(doc.id);
+      const activitySnap = await userRef.collection('activity').orderBy('at', 'desc').limit(40).get();
+
       const name = u.displayName || u.email || '(no name)';
-
-      // mini-game plays only, newest first; repeats are merged into one chip with a count (x2)
-      const plays = activitySnap.docs.map(a=>a.data())
-        .filter(a=> a.type === 'game_played')
-        .map(a=>({ label: a.detail || 'Mini game', ms: (a.at && a.at.toMillis) ? a.at.toMillis() : 0 }))
-        .sort((x,y)=> y.ms - x.ms);
-      const counts = new Map();
-      plays.forEach(p=> counts.set(p.label, (counts.get(p.label) || 0) + 1));
-
+      const activity = activitySnap.docs.map(a => { const d = a.data(); return { ...d, ms: (d.at && d.at.toMillis) ? d.at.toMillis() : 0 }; })
+        .sort((x, y) => y.ms - x.ms);
       return {
-        id: doc.id, name, email: u.email || '', section: SECTION_BY_ID[u.section] ? u.section : '',
+        id: doc.id, name, email: u.email || '', level: u.level || '\u2014', classSection: u.classSection || '',
         streak: calcStreaks(new Set(Array.isArray(u.activeDays) ? u.activeDays : [])).current,
         lastActive: u.lastSeenAt || u.lastLoginTimestamp || 0,
-        chips: [...counts.entries()], lastPlay: plays[0] || null
+        games: activity.filter(a => a.type === 'game_played').length,
+        activity
       };
     }));
-    students.sort((a,b)=> b.lastActive - a.lastActive);
-    adminData = { students };
 
-    const dayAgo = Date.now() - 24*60*60*1000;
-    const assigned = students.filter(s=> s.section);
-    document.getElementById('adminStudentCount').textContent = `${students.length} student${students.length === 1 ? '' : 's'}`;
-    document.getElementById('adminTotalStudents').textContent = students.length;
-    document.getElementById('adminActiveToday').textContent = students.filter(s=> s.lastActive > dayAgo).length;
-    document.getElementById('adminAssigned').textContent = assigned.length;
-    document.getElementById('adminSectionsUsed').textContent = new Set(assigned.map(s=> s.section)).size;
+    students.sort((a,b)=> b.lastActive - a.lastActive);
+    adminStudents = students;
+    renderAdmin();
 
     loading.style.display = 'none';
-    renderAdminFilters();
-    renderAdminSections(true);
+    table.style.display = 'table';
   } catch(err){
     console.error(err);
     loading.style.color = 'var(--orange-dark)';
@@ -1314,144 +2399,124 @@ async function loadAdminDashboard(){
   }
 }
 
-function renderAdminFilters(){
-  const st = adminData.students;
-  const countFor = g => st.filter(s=> s.section && SECTION_BY_ID[s.section].strand.id === g.id).length;
-  const pills = [`<button type="button" class="adm-filter${adminFilter === 'all' ? ' active' : ''}" onclick="setAdminFilter('all')">All sections <b>${st.length}</b></button>`]
-    .concat(SECTION_STRANDS.map(g=>
-      `<button type="button" class="adm-filter${adminFilter === g.id ? ' active' : ''}" style="${secVars(g)}" onclick="setAdminFilter('${g.id}')"><i></i>${g.emoji} ${escapeHtml(g.name)} <b>${countFor(g)}</b></button>`))
-    .concat([`<button type="button" class="adm-filter${adminFilter === 'none' ? ' active' : ''}" style="--sc:#7D8F8F; --si:#fff;" onclick="setAdminFilter('none')"><i></i>No section yet <b>${st.filter(s=> !s.section).length}</b></button>`]);
-  document.getElementById('adminFilters').innerHTML = pills.join('');
-}
-function setAdminFilter(key){ adminFilter = key; renderAdminFilters(); renderAdminSections(true); }
-function toggleAdminSection(id){
-  adminCollapsed.has(id) ? adminCollapsed.delete(id) : adminCollapsed.add(id);
-  const card = document.querySelector(`.adm-card[data-sec="${id}"]`);
-  if(card){
-    card.classList.toggle('collapsed', adminCollapsed.has(id));
-    const h = card.querySelector('.adm-head'); if(h) h.setAttribute('aria-expanded', !adminCollapsed.has(id));
-  }
-}
 
-function adminStudentRow(s, g){
-  const active = s.lastActive > Date.now() - 24*60*60*1000;
-  const shown = s.chips.slice(0, 6), more = s.chips.length - shown.length;
-  const chips = shown.length
-    ? shown.map(([label, n])=> `<span class="aa-chip">${escapeHtml(label)}${n > 1 ? ` <b>\u00D7${n}</b>` : ''}</span>`).join('') + (more > 0 ? `<span class="aa-chip more">+${more} more</span>` : '')
-    : '<span class="adm-none">No mini-game activity yet</span>';
-  return `<div class="adm-stu">
-      <div class="adm-stu-top">
-        <div class="adm-av" style="background:${g.color}; color:${g.ink};">${escapeHtml(getInitials(s.name))}</div>
-        <div class="adm-stu-id"><b>${escapeHtml(s.name)}</b><span>${escapeHtml(s.email)}</span></div>
-        <div class="adm-stu-meta">
-          <span class="adm-streak" title="Day streak">🔥 ${s.streak}</span>
-          <span class="adm-seen${active ? ' on' : ''}"><i></i>${timeAgo(s.lastActive)}</span>
-        </div>
-      </div>
-      <div class="adm-chips"><span class="adm-chips-ico" title="Recent activity">🎮</span>${chips}</div>
-    </div>`;
-}
-
-function adminCard(id, title, emoji, g, students, idx, animate, extraClass){
-  const dayAgo = Date.now() - 24*60*60*1000;
-  const activeCount = students.filter(s=> s.lastActive > dayAgo).length;
-  let latest = null;
-  students.forEach(s=>{ if(s.lastPlay && (!latest || s.lastPlay.ms > latest.ms)) latest = { ms:s.lastPlay.ms, label:s.lastPlay.label, name:s.name }; });
-  const sub = students.length ? `${students.length} student${students.length === 1 ? '' : 's'}${activeCount ? ` · ${activeCount} active today` : ''}` : 'No students yet';
-  const body = students.length
-    ? `<div class="adm-latest">${latest
-          ? `⚡ <span>Latest: <b>${escapeHtml(latest.name)}</b> played <b>${escapeHtml(latest.label)}</b> · ${timeAgo(latest.ms)}</span>`
-          : '💤 <span>No mini-game activity in this section yet</span>'}</div>
-       ${students.map(s=> adminStudentRow(s, g)).join('')}`
-    : '<div class="adm-empty"><span>🪑</span>No one has joined this section yet.</div>';
-  const collapsed = adminCollapsed.has(id);
-  return `<div class="adm-card ${g.lightText ? 'ink-light' : 'ink-dark'}${extraClass || ''}${collapsed ? ' collapsed' : ''}${animate ? '' : ' no-anim'}" data-sec="${id}" style="${secVars(g)} --i:${idx};">
-      <button type="button" class="adm-head" onclick="toggleAdminSection('${id}')" aria-expanded="${!collapsed}">
-        <span class="adm-ico">${emoji}</span>
-        <span class="adm-title"><h4>${escapeHtml(title)}</h4><small>${sub}</small></span>
-        <span class="adm-count">${students.length}</span>
-        <svg class="adm-chev" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </button>
-      <div class="adm-body-wrap"><div class="adm-body">${body}</div></div>
-    </div>`;
-}
-
-function renderAdminSections(animate){
-  const host = document.getElementById('adminSections'); if(!host) return;
-  const q = (document.getElementById('adminSearch')?.value || '').trim().toLowerCase();
-  const match = s => !q || s.name.toLowerCase().includes(q) || s.email.toLowerCase().includes(q);
-  const cards = [];
-  if(adminFilter !== 'none'){
-    SECTIONS.forEach(sec=>{
-      if(adminFilter !== 'all' && sec.strand.id !== adminFilter) return;
-      const list = adminData.students.filter(s=> s.section === sec.id && match(s));
-      if(q && !list.length) return;                      // while searching, only show sections with a match
-      cards.push(adminCard(sec.id, sec.label, sec.strand.emoji, sec.strand, list, cards.length, animate));
-    });
-  }
-  if(adminFilter === 'all' || adminFilter === 'none'){
-    const list = adminData.students.filter(s=> !s.section && match(s));
-    if(list.length) cards.push(adminCard('none', 'No section yet', '❔',
-      { color:'#7D8F8F', dark:'#5F7272', tint:'#EEF2F1', ink:'#FFFFFF', lightText:true }, list, cards.length, animate, ' adm-unassigned'));
-  }
-  host.innerHTML = cards.length ? cards.join('')
-    : `<div class="adm-nothing">${q ? '🔍 No student matches your search.' : 'No students to show here yet.'}</div>`;
-}
-
-
-/* ================= HOME: WARM-UP CHALLENGE + SURPRISE TOPIC ================= */
-const MINUS = '\u2212';
-function fmtNum(n){ return n < 0 ? MINUS + Math.abs(n) : String(n); }
+/* ================= HOME: WARM-UP CHALLENGE (number system conversions) ================= */
 function randInt(a,b){ return Math.floor(Math.random()*(b-a+1))+a; }
+const WU_DIGITS = '0123456789ABCDEF';
 
-// Each generator returns {tag, q, answer}
-const WARMUP_GENERATORS = [
-  ()=>{ const a=randInt(12,89), b=randInt(11,79); return {tag:'\u2795 Addition', q:`${a} + ${b} = ?`, answer:a+b}; },
-  ()=>{ const a=randInt(40,99), b=randInt(11,39); return {tag:'\u2796 Subtraction', q:`${a} ${MINUS} ${b} = ?`, answer:a-b}; },
-  ()=>{ const a=randInt(3,12), b=randInt(3,12); return {tag:'\u2716\uFE0F Multiplication', q:`${a} \u00D7 ${b} = ?`, answer:a*b}; },
-  ()=>{ const b=randInt(3,12), r=randInt(3,12); return {tag:'\u2797 Division', q:`${b*r} \u00F7 ${b} = ?`, answer:r}; },
+// The six conversion types. Every type has a fixed range of numbers, so the warm-up knows every possible question.
+//   from / to = number bases, lo / hi = the range of decimal values used to build the question.
+const WU_TYPES = [
+  { tag:'Binary \u2192 Decimal',     from:2,  to:10, lo:8,  hi:63  },
+  { tag:'Decimal \u2192 Binary',     from:10, to:2,  lo:8,  hi:63  },
+  { tag:'Binary \u2192 Octal',       from:2,  to:8,  lo:8,  hi:255 },
+  { tag:'Octal \u2192 Binary',       from:8,  to:2,  lo:8,  hi:63  },
+  { tag:'Binary \u2192 Hexadecimal', from:2,  to:16, lo:16, hi:255 },
+  { tag:'Hexadecimal \u2192 Binary', from:16, to:2,  lo:16, hi:255 }
 ];
+const WU_BASE_NAME = { 2:'binary', 8:'octal', 10:'decimal', 16:'hex' };
+function wuFmt(n, base){ return n.toString(base).toUpperCase(); }
+// What the student sees: binary numbers are shown in groups of 4 bits (display only, the answer is unchanged).
+function wuShow(n, base){
+  const s = wuFmt(n, base);
+  if(base !== 2) return s;
+  const g = [];
+  for(let i = s.length; i > 0; i -= 4) g.unshift(s.slice(Math.max(0, i - 4), i));
+  return g.join(' ');
+}
+
+// NO-REPEAT SYSTEM (a shuffled "deck", like a deck of cards):
+//  1. Each type owns a shuffled deck of every number in its range. A number is dealt once, then it is gone.
+//  2. The next TYPE comes from a shuffled bag that holds each of the 6 types once, so the types are mixed
+//     evenly and the same type never shows up twice in a row.
+//  3. A deck is only reshuffled after every number in it has been used (and the first card of the new
+//     deck is never the card that was just dealt).
+const wuDecks = [];
+let wuBag = [], wuLastType = -1, wuLastNum = -1, wuCount = 0;
+
+function wuDealNumber(t){
+  const T = WU_TYPES[t];
+  let deck = wuDecks[t];
+  if(!deck || !deck.length){
+    const all = [];
+    for(let n = T.lo; n <= T.hi; n++) all.push(n);
+    deck = shuffleArr(all);
+    if(deck.length > 1 && t === wuLastType && deck[deck.length - 1] === wuLastNum) deck.unshift(deck.pop());
+    wuDecks[t] = deck;
+  }
+  return deck.pop();
+}
+function wuNextType(){
+  if(!wuBag.length){
+    wuBag = shuffleArr(WU_TYPES.map((_, i) => i));
+    if(wuBag[wuBag.length - 1] === wuLastType) wuBag.unshift(wuBag.pop());   // never the same type twice in a row
+  }
+  return wuBag.pop();
+}
+
+// Builds 4 different answer choices: the right one plus 3 look-alikes (one digit changed, or a nearby number).
+function wuChoices(answer, base){
+  const set = new Set([answer]);
+  let guard = 0;
+  while(set.size < 4 && guard++ < 400){
+    let cand;
+    if(base === 10){
+      const n = parseInt(answer, 10) + randInt(1, 9) * (Math.random() < .5 ? -1 : 1);
+      if(n < 1) continue;
+      cand = String(n);
+    } else {
+      const chars = answer.split('');
+      const pos = randInt(0, chars.length - 1);
+      const d = WU_DIGITS[randInt(0, base - 1)];
+      if(d === chars[pos]) continue;
+      if(pos === 0 && d === '0' && chars.length > 1) continue;
+      chars[pos] = d;
+      cand = chars.join('');
+    }
+    set.add(cand);
+  }
+  return Array.from(set);
+}
 
 let wuStreak = 0, wuBest = 0, wuAnswered = false, wuCurrent = null;
 try{ wuBest = parseInt(localStorage.getItem('genWarmupBest') || '0', 10) || 0; }catch(e){}
 
 function newWarmup(){
-  const gen = WARMUP_GENERATORS[randInt(0, WARMUP_GENERATORS.length-1)];
-  wuCurrent = gen();
+  const t = wuNextType();
+  const n = wuDealNumber(t);
+  const T = WU_TYPES[t];
+  wuLastType = t; wuLastNum = n; wuCount++;
+  wuCurrent = { tag:T.tag, answer:wuFmt(n, T.to), base:T.to, type:t, n:n };
   wuAnswered = false;
+  const list = shuffleArr(wuChoices(wuCurrent.answer, wuCurrent.base));
 
-  // 3 distinct wrong answers close to the right one
-  const opts = new Set([wuCurrent.answer]);
-  let guard = 0;
-  while(opts.size < 4 && guard++ < 60){
-    const off = randInt(1,10) * (Math.random() < .5 ? -1 : 1);
-    const cand = wuCurrent.answer + off;
-    if(cand >= 0 || wuCurrent.answer < 0) opts.add(cand);
-  }
-  const list = Array.from(opts).sort(()=>Math.random()-.5);
-
-  document.getElementById('wuTag').textContent = wuCurrent.tag;
-  document.getElementById('wuQuestion').textContent = wuCurrent.q;
+  document.getElementById('wuTag').textContent = '\uD83D\uDD22 ' + T.tag;
+  document.getElementById('wuQuestion').innerHTML =
+    `<span class="wu-q-part"><b class="wu-num">${escapeHtml(wuShow(n, T.from))}</b><i class="wu-base">${WU_BASE_NAME[T.from]}</i></span>` +
+    `<span class="wu-q-arrow" aria-hidden="true">\u2192</span>` +
+    `<span class="wu-q-part"><b class="wu-num wu-unknown">?</b><i class="wu-base">${WU_BASE_NAME[T.to]}</i></span>`;
+  document.getElementById('wuQuestion').setAttribute('aria-label', `${wuFmt(n, T.from)} in ${WU_BASE_NAME[T.from]} equals what in ${WU_BASE_NAME[T.to]}?`);
   document.getElementById('wuOptions').innerHTML = list.map(v =>
-    `<button class="wu-opt" data-val="${v}" onclick="answerWarmup(${v}, this)">${fmtNum(v)}</button>`).join('');
+    `<button class="wu-opt" data-val="${v}" onclick="answerWarmup(this)">${v}</button>`).join('');
   const fb = document.getElementById('wuFeedback');
   fb.textContent = 'Pick an answer!';
   fb.className = 'wu-feedback';
   document.getElementById('wuNext').classList.remove('show');
   document.getElementById('wuStreak').textContent = wuStreak;
   document.getElementById('wuBest').textContent = wuBest;
+  document.getElementById('wuCount').textContent = wuCount;
 }
 
-function answerWarmup(value, btn){
+function answerWarmup(btn){
   if(wuAnswered) return;
   wuAnswered = true;
   markActiveToday();
-  const right = value === wuCurrent.answer;
+  const right = btn.dataset.val === wuCurrent.answer;
   const fb = document.getElementById('wuFeedback');
 
   document.querySelectorAll('#wuOptions .wu-opt').forEach(b=>{
     b.disabled = true;
-    if(Number(b.dataset.val) === wuCurrent.answer) b.classList.add('correct');
+    if(b.dataset.val === wuCurrent.answer) b.classList.add('correct');
   });
 
   if(right){
@@ -1467,7 +2532,7 @@ function answerWarmup(value, btn){
     card.classList.remove('pop'); void card.offsetWidth; card.classList.add('pop');
   } else {
     btn.classList.add('wrong');
-    fb.textContent = `Not quite \u2014 the answer is ${fmtNum(wuCurrent.answer)}. Try the next one!`;
+    fb.textContent = `Not quite \u2014 the answer is ${wuCurrent.answer}. Try the next one!`;
     fb.className = 'wu-feedback bad';
     wuStreak = 0;
   }
@@ -1502,11 +2567,46 @@ function shuffleOptions(q){
   return Object.assign({}, q, { options: opts, answer: opts.indexOf(correct) });
 }
 
+const BASE_NAMES = { 2:'Binary', 8:'Octal', 10:'Decimal', 16:'Hexadecimal' };
+function baseLabel(b){ return (BASE_NAMES[b] || 'Base ' + b) + ' \u00B7 base ' + b; }
+
+// Shows a binary number in groups of 4 bits (display only) so long numbers are easy to read.
+function convDisplayNum(num, base, isExpr){
+  const text = String(num);
+  if(isExpr || base !== 2) return escapeHtml(text);
+  const groups = [];
+  for(let i = text.length; i > 0; i -= 4) groups.unshift(text.slice(Math.max(0, i - 4), i));
+  return groups.map(g => `<span class="bit-grp">${escapeHtml(g)}</span>`).join('');
+}
+
 function correctAnswer(q){
   return (typeof q.answer === 'number' && q.options) ? String(q.options[q.answer]) : String(q.answer);
 }
 function normAnswer(v){ return String(v).replace(/[\u2212\u2013\u2014]/g,'-').replace(/[,\s]/g,'').toLowerCase(); }
-function answersMatch(a, b){
+
+// Binary / octal / hex answers: ignore spaces, upper/lower case, a 0b / 0o / 0x prefix and leading zeros.
+function normBase(v, base){
+  let s = String(v).replace(/[\s_,]/g, '').toLowerCase();
+  if(base === 2) s = s.replace(/^0b/, '');
+  else if(base === 8) s = s.replace(/^0o/, '');
+  else if(base === 16) s = s.replace(/^0x/, '');
+  return s.replace(/^0+(?=.)/, '');
+}
+const BASE_DIGITS = { 2:/^[01]+$/, 8:/^[0-7]+$/, 10:/^[0-9]+$/, 16:/^[0-9a-f]+$/ };
+const BASE_DIGIT_MSG = {
+  2:'Binary answers use only the digits 0 and 1.',
+  8:'Octal answers use only the digits 0 to 7.',
+  10:'Decimal answers use only the digits 0 to 9.',
+  16:'Hex answers use only 0 to 9 and the letters A to F.'
+};
+function answerShapeError(v, q){
+  const base = q && q.base;
+  if(!base || !BASE_DIGITS[base]) return '';
+  return BASE_DIGITS[base].test(normBase(v, base)) ? '' : BASE_DIGIT_MSG[base];
+}
+function answersMatch(a, b, q){
+  const base = q && q.base;
+  if(base === 2 || base === 8 || base === 16) return normBase(a, base) === normBase(b, base);
   const x = normAnswer(a), y = normAnswer(b);
   if(x !== '' && !isNaN(Number(x)) && !isNaN(Number(y))) return Number(x) === Number(y);
   return x === y;
@@ -1517,6 +2617,11 @@ function gameFocusInput(){
   if(inp) inp.focus({preventScroll:true});
 }
 
+// Personal best score for each game, kept in this browser.
+function gameBestKey(s){ return 'genBest_' + s.topic.key + (s.level ? '_' + s.level : ''); }
+function gameLoadBest(s){ try{ return parseInt(localStorage.getItem(gameBestKey(s)) || '0', 10) || 0; }catch(e){ return 0; } }
+function gameSaveBest(s){ try{ localStorage.setItem(gameBestKey(s), String(s.best)); }catch(e){} }
+
 function gameInit(topic){
   const g = topic.game || {};
   const bank = g.questions || [];
@@ -1525,8 +2630,10 @@ function gameInit(topic){
     topic, bank, useLevels, level:null,
     questions: useLevels ? [] : bank,
     cta: g.cta || `Think you've mastered ${topic.title}? Take the challenge, beat your best score, and tap Show solution whenever you're stuck!`,
-    idx:0, score:0, typed:'', checked:false, showSol:false, fb:'', fbClass:''
+    idx:0, score:0, typed:'', checked:false, showSol:false, fb:'', fbClass:'',
+    logged:false, best:0, bestDone:false, newBest:false, results:[]
   };
+  gameState.best = gameLoadBest(gameState);
   renderGame();
 }
 
@@ -1535,7 +2642,8 @@ function gameStartLevel(level){
   s.level = level;
   logGamePlay(s.topic.title, level);
   s.questions = shuffleArr(s.bank.filter(q => q.level === level));
-  s.idx = 0; s.score = 0; s.typed = ''; s.checked = false; s.showSol = false; s.fb = ''; s.fbClass = '';
+  s.idx = 0; s.score = 0; s.results = []; s.typed = ''; s.checked = false; s.showSol = false; s.fb = ''; s.fbClass = '';
+  s.best = gameLoadBest(s); s.bestDone = false; s.newBest = false;
   renderGame();
   gameFocusInput();
 }
@@ -1543,7 +2651,7 @@ function gameStartLevel(level){
 function gameBackToLevels(){
   const s = gameState; if(!s) return;
   s.level = null; s.questions = [];
-  s.idx = 0; s.score = 0; s.typed = ''; s.checked = false; s.showSol = false; s.fb = ''; s.fbClass = '';
+  s.idx = 0; s.score = 0; s.results = []; s.typed = ''; s.checked = false; s.showSol = false; s.fb = ''; s.fbClass = '';
   renderGame();
 }
 
@@ -1556,9 +2664,16 @@ function renderGame(){
   const q = s.questions[s.idx];
   const preview = !picking && !q && total === 0;
   const finished = !picking && total > 0 && s.idx >= total;
-  const letters = ['A','B','C','D'];
   const pct = total ? Math.round(Math.min(s.idx, total) / total * 100) : 0;
   const lv = s.level ? GAME_LEVELS[s.level] : null;
+  const qlv = (q && q.level && GAME_LEVELS[q.level]) ? GAME_LEVELS[q.level] : lv;
+
+  // Save a new personal best once, the moment the game is finished.
+  if(finished && !s.bestDone){
+    s.bestDone = true;
+    s.newBest = s.score > s.best;
+    if(s.newBest){ s.best = s.score; gameSaveBest(s); }
+  }
 
   let body;
   if(picking){
@@ -1578,34 +2693,53 @@ function renderGame(){
       <div class="game-levels-title">Choose your difficulty</div>
       <div class="game-level-grid">${cards}</div>`;
   } else if(finished){
+    const p = total ? Math.round(s.score / total * 100) : 0;
+    const emoji = p === 100 ? '🏆' : p >= 80 ? '🎉' : p >= 50 ? '👏' : '💪';
+    const msg = p === 100 ? 'Perfect score! You are a number-system master.'
+              : p >= 80 ? 'Awesome work! Only a few more to master.'
+              : p >= 50 ? 'Good effort! Re-read the quick lesson and try again.'
+              : 'Keep practicing! Read the quick lesson above, then give it another go.';
     body = `
       <div class="game-finish">
-        <div class="gf-emoji">${s.score === total ? '🏆' : '🎉'}</div>
+        <div class="gf-emoji">${emoji}</div>
         <h4>${lv ? lv.label + ' level' : 'Challenge'} complete!</h4>
-        <p>You scored <b>${s.score}</b> out of <b>${total}</b>.</p>
+        <p>You scored <b>${s.score}</b> out of <b>${total}</b> (${p}%).</p>
+        <p class="gf-msg">${msg}</p>
+        ${s.newBest ? '<div class="gf-best">🌟 New personal best!</div>' : ''}
         <div class="game-actions">
           <button class="game-btn primary" onclick="${s.useLevels ? `gameStartLevel('${s.level}')` : 'gameRestart()'}">↺ Play again</button>
           ${s.useLevels ? `<button class="game-btn ghost" onclick="gameBackToLevels()">Change level</button>` : ''}
         </div>
       </div>`;
   } else {
-    const inCls = 'game-input' + (s.checked ? (s.fbClass === 'good' ? ' correct' : ' wrong') : '');
+    const isHex = !!(q && q.to === 16);
+    const inCls = 'game-input' + (isHex ? ' hex' : '') + (s.checked ? (s.fbClass === 'good' ? ' correct' : ' wrong') : '');
+    const inMode = (q && q.to && q.to !== 16) ? 'numeric' : 'text';
 
     const steps = (q && q.solution && q.solution.length ? q.solution : [null,null,null]).map((t,i)=>`
         <li><span class="gs-num">${i+1}</span><span class="${t===null?'placeholder':''}">${t===null ? 'Step ' + (i+1) + ' of the solution will appear here.' : escapeHtml(t)}</span></li>`).join('');
 
+    const conv = (q && q.num) ? `
+        <div class="conv-row">
+          <div class="conv-box from"><b class="conv-num${q.expr ? ' expr' : ''}">${convDisplayNum(q.num, q.from, q.expr)}</b><span class="conv-sub">${baseLabel(q.from)}</span></div>
+          <span class="conv-arrow" aria-hidden="true">→</span>
+          <div class="conv-box to"><b class="conv-num">?</b><span class="conv-sub">${baseLabel(q.to)}</span></div>
+        </div>` : '';
+
     body = `
       <div class="game-progress"><div class="game-progress-fill" style="width:${pct}%"></div></div>
+      <div class="game-pips" role="img" aria-label="Question ${Math.min(s.idx+1, Math.max(total,1))} of ${total}">${Array.from({length:total}, (_, i) => `<span class="pip ${s.results && s.results[i] === true ? 'ok' : s.results && s.results[i] === false ? 'no' : ''} ${i === s.idx ? 'now' : ''}"></span>`).join('')}</div>
       <div class="game-q-card">
-        <span class="game-q-label">${lv ? lv.emoji + ' ' + lv.label + ' · ' : ''}Question ${Math.min(s.idx+1, Math.max(total,1))}</span>
+        <span class="game-q-label">${qlv ? qlv.emoji + ' ' + qlv.label + ' · ' : ''}Question ${Math.min(s.idx+1, Math.max(total,1))} of ${total || '–'}</span>
         <div class="game-q-text ${q?'':'placeholder'}">${q ? escapeHtml(q.q) : 'Your question will appear here'}</div>
+        ${conv}
       </div>
       <div class="game-answer">
-        <label class="game-answer-label" for="gameInput">Your answer</label>
-        <input id="gameInput" class="${inCls}" type="text" inputmode="text" autocomplete="off" spellcheck="false"
+        <label class="game-answer-label" for="gameInput">${q && q.to ? 'Your answer in ' + (BASE_NAMES[q.to] || 'base ' + q.to).toLowerCase() : 'Your answer'}</label>
+        <input id="gameInput" class="${inCls}" type="text" inputmode="${inMode}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
                placeholder="${q ? 'Type your answer here' : 'Your answer goes here'}" value="${escapeHtml(s.typed || '')}"
                ${s.checked || !q ? 'disabled' : ''}
-               oninput="gameType(this.value)" onkeydown="if(event.key==='Enter'){gameCheck();}">
+               oninput="gameType(this.value)" onkeydown="if(event.key==='Enter'){ ${s.checked ? 'gameNext()' : 'gameCheck()'}; }">
       </div>
       <div class="game-feedback ${s.fbClass||''}">${s.fb || (preview ? 'This is a preview of the game. Questions are coming soon!' : 'Type your answer, then press Check.')}</div>
       <div class="game-actions">
@@ -1624,6 +2758,7 @@ function renderGame(){
         <div class="game-stats">
           ${lv ? `<span class="game-pill ${lv.cls}">${lv.emoji} ${lv.label}</span>` : ''}
           <span class="game-pill">⭐ Score <b>${s.score}</b></span>
+          <span class="game-pill">🏆 Best <b>${s.best}</b></span>
           <span class="game-pill">🎯 <b>${Math.min(s.idx+1, Math.max(total,1))}</b> / ${total || '–'}</span>
           ${s.useLevels ? `<button class="game-pill game-pill-btn" onclick="gameBackToLevels()">↩ Change level</button>` : ''}
         </div>`;
@@ -1649,9 +2784,14 @@ function gameCheck(){
   const q = s.questions[s.idx];
   if(!q){ s.fb = 'Preview only. Questions are coming soon!'; s.fbClass = ''; renderGame(); return; }
   if(!String(s.typed || '').trim()){ s.fb = 'Type your answer first!'; s.fbClass = 'bad'; renderGame(); gameFocusInput(); return; }
+  const shapeErr = answerShapeError(s.typed, q);
+  if(shapeErr){ s.fb = shapeErr + ' Fix it and press Check again.'; s.fbClass = 'bad'; renderGame(); gameFocusInput(); return; }
   s.checked = true;
   markActiveToday();
-  if(answersMatch(s.typed, correctAnswer(q))){ s.score++; s.fb = 'Correct! Great job! ⭐'; s.fbClass = 'good'; }
+  if(!s.useLevels && !s.logged){ s.logged = true; logGamePlay(s.topic.title, s.topic.diff || null); }
+  const ok = answersMatch(s.typed, correctAnswer(q), q);
+  s.results[s.idx] = ok;
+  if(ok){ s.score++; s.fb = 'Correct! Great job! ⭐'; s.fbClass = 'good'; }
   else { s.fb = 'Not quite. Press Show solution to see how it works.'; s.fbClass = 'bad'; }
   renderGame();
 }
@@ -1663,10 +2803,11 @@ function gameToggleSolution(){
 }
 
 function gameNext(){
-  const s = gameState; if(!s) return;
+  const s = gameState; if(!s || !s.checked) return;
   s.idx++; s.typed = ''; s.checked = false; s.showSol = false; s.fb = ''; s.fbClass = '';
   renderGame();
   gameFocusInput();
+  if(s.idx < s.questions.length) window.scrollTo({ top: Math.max(0, document.getElementById('gameMount').getBoundingClientRect().top + window.scrollY - 90), behavior:'smooth' });
 }
 
 function gameRestart(){ gameInit(gameState.topic); }
@@ -1786,7 +2927,7 @@ renderStreakCalendar();
 
 
 /* ================= SKETCHPAD (scratch space on every lesson page) ================= */
-// Each topic (Addition, Subtraction, Multiplication, Division) gets its own sketchpad under the mini game.
+// Each topic (Binary to Decimal, Decimal to Binary, and so on) gets its own sketchpad under the mini game.
 // Drawings are kept per topic while the page is open, so switching topics and coming back keeps your work.
 const SKETCH_COLORS = [
   {name:'Ink',    val:'#1E3A3A'},
@@ -1811,6 +2952,7 @@ function sketchInit(topic){
   if(!mount) return;
 
   const entry = sketchStore[topic.key] || (sketchStore[topic.key] = { strokes:[], redo:[], w:0, h:0 });
+  if(!entry.view) entry.view = { z:1, x:0, y:0 };      // zoom level and pan, remembered for this topic
 
   const colorBtns = SKETCH_COLORS.map(c =>
     `<button class="sk-color" data-color="${c.val}" style="background:${c.val};" title="${c.name}" aria-label="${c.name} pen" onclick="sketchSetColor('${c.val}')"></button>`).join('');
@@ -1830,20 +2972,25 @@ function sketchInit(topic){
           <span id="skMaxTxt">Maximize</span>
         </button>
       </div>
-      <div class="game-cta"><span>🧮</span><p>Work out your ${escapeHtml(topic.title.toLowerCase())} problems here: write the numbers, draw groups, or try a method. Use a finger, pen or mouse.</p></div>
+      <div class="game-cta"><span>🧮</span><p>Work out your ${escapeHtml(topic.title.toLowerCase())} problems here: write the numbers, draw groups, or try a method. Use a finger, pen or mouse. Pinch with two fingers to zoom and move around.</p></div>
 
       <div class="sk-toolbar">
         <div class="sk-group">
           <button class="sk-btn" data-tool="pen" onclick="sketchSetTool('pen')">✏️ Pen</button>
           <button class="sk-btn" data-tool="eraser" onclick="sketchSetTool('eraser')">🧽 Eraser</button>
+          <button class="sk-btn" data-tool="hand" onclick="sketchSetTool('hand')" title="Drag to move around the page">✋ Move</button>
         </div>
         <div class="sk-group" role="group" aria-label="Pen colors">${colorBtns}</div>
         <label class="sk-size">Size <input type="range" id="skSize" min="2" max="24" step="1" value="${sketchPrefs.size}" oninput="sketchSetSize(this.value)"><b id="skSizeVal">${sketchPrefs.size}</b></label>
       </div>
 
       <div class="sk-wrap sk-bg-${sketchPrefs.bg}" id="skWrap">
-        <canvas class="sk-canvas" id="skCanvas" tabindex="0" aria-label="Sketchpad drawing area"></canvas>
-        <button type="button" class="sk-more" id="skMore" hidden onclick="sketchToggleMax()">✏️ More of your work is outside this view · Maximize to see it</button>
+        <canvas class="sk-canvas" id="skCanvas" tabindex="0" aria-label="Sketchpad drawing area. Pinch with two fingers to zoom, or use the zoom buttons."></canvas>
+        <div class="sk-zoom" role="group" aria-label="Zoom">
+          <button type="button" class="sk-zbtn" onclick="sketchZoomBy(0.8)" aria-label="Zoom out">−</button>
+          <button type="button" class="sk-zbtn sk-zval" id="skZoomVal" onclick="sketchZoomReset()" title="Back to 100%" aria-label="Reset zoom">100%</button>
+          <button type="button" class="sk-zbtn" onclick="sketchZoomBy(1.25)" aria-label="Zoom in">+</button>
+        </div>
       </div>
 
       <div class="sk-toolbar sk-toolbar-bottom">
@@ -1861,7 +3008,7 @@ function sketchInit(topic){
     </div>`;
 
   const cv = document.getElementById('skCanvas');
-  sketch = { topic, entry, canvas:cv, ctx:cv.getContext('2d'), dpr:1, k:1, max:false, busy:false, ph:null, bd:null, cur:null, pid:null, ro:null };
+  sketch = { topic, entry, canvas:cv, ctx:cv.getContext('2d'), dpr:1, k:1, max:false, busy:false, ph:null, bd:null, cur:null, pid:null, ro:null, ptrs:new Map(), g:null, pan:null, lock:false, space:false, raf:0 };
   sketchBindCanvas();
 
   // The lesson page is hidden until everything is built, so size the canvas whenever it actually becomes visible.
@@ -1880,21 +3027,21 @@ function sketchFit(){
   if(!w || !h) return;                       // still hidden
   const e = s.entry;
   if(s.max){
-    // Maximized = more room to write: the canvas gets bigger but the writing keeps its size and place.
-    s.k = 1;
+    // Maximized = a zoom: the drawing keeps its shape and simply scales with the width.
+    s.k = e.w ? w / e.w : 1;
   } else {
     s.k = 1;
     if(e.w && e.h && (e.w !== w || e.h !== h)){   // window resized or phone rotated: scale the drawing with it
       const kx = w / e.w, ky = h / e.h;
       e.strokes.concat(e.redo).forEach(st => { if(st.pts) st.pts.forEach(p => { p.x *= kx; p.y *= ky; }); });
+      if(e.view){ e.view.x *= kx; e.view.y *= ky; }
     }
     e.w = w; e.h = h;
   }
   s.dpr = window.devicePixelRatio || 1;
   const pw = Math.round(w * s.dpr), ph = Math.round(h * s.dpr);
   if(s.canvas.width !== pw || s.canvas.height !== ph){ s.canvas.width = pw; s.canvas.height = ph; }
-  const wrap = document.getElementById('skWrap');       // the grid / lines zoom together with the drawing
-  if(wrap) wrap.style.setProperty('--sk-k', s.k);
+  skApplyView();
   sketchRedraw();
 }
 
@@ -1925,18 +3072,17 @@ function sketchDrawStroke(ctx, st){
 
 function sketchRedraw(){
   const s = sketch; if(!s) return;
-  const ctx = s.ctx, sc = s.dpr * s.k, W = s.canvas.width / sc, H = s.canvas.height / sc;
-  ctx.setTransform(sc, 0, 0, sc, 0, 0);
-  ctx.clearRect(0, 0, W, H);
-  s.entry.strokes.forEach(st => {
-    if(st.clear) ctx.clearRect(0, 0, W, H); else sketchDrawStroke(ctx, st);
-  });
+  const ctx = s.ctx, sc = s.dpr * s.k, v = s.entry.view;
+  const wipe = () => { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, s.canvas.width, s.canvas.height); ctx.setTransform(sc * v.z, 0, 0, sc * v.z, sc * v.x, sc * v.y); };
+  wipe();
+  s.entry.strokes.forEach(st => { if(st.clear) wipe(); else sketchDrawStroke(ctx, st); });
 }
 
 // Draws just the newest bit of the stroke while the pen is moving (fast and smooth).
 function sketchLiveSegment(final){
   const s = sketch, st = s.cur, p = st.pts, n = p.length, ctx = s.ctx;
-  ctx.setTransform(s.dpr * s.k, 0, 0, s.dpr * s.k, 0, 0);
+  const sc = s.dpr * s.k, v = s.entry.view;
+  ctx.setTransform(sc * v.z, 0, 0, sc * v.z, sc * v.x, sc * v.y);
   sketchStyle(ctx, st);
   ctx.beginPath();
   if(n === 1){
@@ -1954,27 +3100,123 @@ function sketchLiveSegment(final){
   ctx.globalCompositeOperation = 'source-over';
 }
 
+/* ---------- Zoom and pan ----------
+   The drawing lives in "page units". entry.view = { z, x, y } says how the page is shown on the canvas:
+   a page point (px, py) appears at  (px * z + x, py * z + y)  in canvas units. Pinching changes z and x/y. */
+const SK_ZMIN = 0.5, SK_ZMAX = 8;
+function skClamp(n, lo, hi){ return Math.min(hi, Math.max(lo, n)); }
+function sketchSetView(x, y, z){
+  const s = sketch; if(!s) return;
+  const k = s.k || 1, W = s.canvas.clientWidth / k, H = s.canvas.clientHeight / k;
+  z = skClamp(z, SK_ZMIN, SK_ZMAX);
+  const v = s.entry.view;
+  v.z = z;
+  v.x = skClamp(x, 60 - W * z, W - 60);      // never let the page slide completely out of sight
+  v.y = skClamp(y, 60 - H * z, H - 60);
+  if(!s.raf) s.raf = requestAnimationFrame(() => { s.raf = 0; skApplyView(); sketchRedraw(); });
+}
+// zoom by a factor around a point (cx, cy in canvas units); default = the middle of the canvas
+function sketchZoomBy(factor, cx, cy){
+  const s = sketch; if(!s) return;
+  const k = s.k || 1, v = s.entry.view;
+  if(cx == null) cx = s.canvas.clientWidth / k / 2;
+  if(cy == null) cy = s.canvas.clientHeight / k / 2;
+  const z = skClamp(v.z * factor, SK_ZMIN, SK_ZMAX);
+  const px = (cx - v.x) / v.z, py = (cy - v.y) / v.z;      // the page point under (cx, cy) stays put
+  sketchSetView(cx - px * z, cy - py * z, Math.abs(z - 1) < 0.03 ? 1 : z);
+}
+function sketchZoomReset(){ sketchSetView(0, 0, 1); }
+// shows the zoom on the grid / lines behind the drawing and on the zoom buttons
+function skApplyView(){
+  const s = sketch; if(!s) return;
+  const v = s.entry.view, k = s.k || 1;
+  const wrap = document.getElementById('skWrap');
+  if(wrap){
+    wrap.style.setProperty('--sk-k', k * v.z);
+    wrap.style.setProperty('--sk-x', (v.x * k) + 'px');
+    wrap.style.setProperty('--sk-y', (v.y * k) + 'px');
+  }
+  const lbl = document.getElementById('skZoomVal');
+  if(lbl){
+    lbl.textContent = Math.round(v.z * 100) + '%';
+    lbl.classList.toggle('is-zoomed', v.z !== 1 || v.x !== 0 || v.y !== 0);
+  }
+}
+
 function sketchBindCanvas(){
   const s = sketch, cv = s.canvas;
-  const pos = ev => { const r = cv.getBoundingClientRect(), k = s.k || 1; return { x: (ev.clientX - r.left) / k, y: (ev.clientY - r.top) / k }; };
+  const view = () => s.entry.view;
+  // a pointer position in canvas units (before zoom), and the same position on the page being drawn on
+  const local = ev => { const r = cv.getBoundingClientRect(), k = s.k || 1; return { x:(ev.clientX - r.left) / k, y:(ev.clientY - r.top) / k }; };
+  const pos = ev => { const p = local(ev), v = view(); return { x:(p.x - v.x) / v.z, y:(p.y - v.y) / v.z }; };
+
+  const dropStroke = () => { if(s.cur){ s.cur = null; s.pid = null; sketchRedraw(); } };
+
+  // two fingers down: stop drawing and start a pinch (zoom) + drag (pan)
+  const startPinch = () => {
+    dropStroke();
+    if(s.pan){ s.pan = null; cv.classList.remove('is-panning'); }
+    const ids = Array.from(s.ptrs.keys()).slice(0, 2);
+    const A = s.ptrs.get(ids[0]), B = s.ptrs.get(ids[1]);
+    const r = cv.getBoundingClientRect(), k = s.k || 1, v = view();
+    s.g = {
+      a:ids[0], b:ids[1], d0:Math.max(1, Math.hypot(A.x - B.x, A.y - B.y)),
+      m0:{ x:((A.x + B.x) / 2 - r.left) / k, y:((A.y + B.y) / 2 - r.top) / k },
+      v0:{ z:v.z, x:v.x, y:v.y }
+    };
+    s.lock = true;
+  };
+  const updatePinch = () => {
+    const g = s.g, A = s.ptrs.get(g.a), B = s.ptrs.get(g.b); if(!A || !B) return;
+    const r = cv.getBoundingClientRect(), k = s.k || 1;
+    const mx = ((A.x + B.x) / 2 - r.left) / k, my = ((A.y + B.y) / 2 - r.top) / k;
+    const z = skClamp(g.v0.z * Math.hypot(A.x - B.x, A.y - B.y) / g.d0, SK_ZMIN, SK_ZMAX);
+    const px = (g.m0.x - g.v0.x) / g.v0.z, py = (g.m0.y - g.v0.y) / g.v0.z;   // page point that was between the fingers
+    sketchSetView(mx - px * z, my - py * z, z);                                // keep it between the fingers
+  };
+  const startPan = e => {
+    const p = local(e), v = view();
+    s.pan = { pid:e.pointerId, sx:p.x, sy:p.y, vx:v.x, vy:v.y };
+    cv.classList.add('is-panning');
+  };
 
   cv.addEventListener('pointerdown', e => {
-    if(e.pointerType === 'mouse' && e.button !== 0) return;
+    if(e.pointerType === 'mouse' && e.button !== 0 && e.button !== 1) return;
     if(s.busy) return;                 // wait for the zoom animation to finish before drawing
     e.preventDefault();
     cv.focus({ preventScroll:true });
     try{ cv.setPointerCapture(e.pointerId); }catch(_){}
-    const P = sketchPrefs, erase = P.tool === 'eraser';
+    if(e.pointerType === 'touch'){
+      s.ptrs.set(e.pointerId, { x:e.clientX, y:e.clientY });
+      if(s.ptrs.size >= 2){ if(!s.g) startPinch(); return; }
+      if(s.lock) return;
+    }
+    if(s.g || s.pan) return;
+    if(e.button === 1 || s.space || sketchPrefs.tool === 'hand'){ startPan(e); return; }
+    const P = sketchPrefs, erase = P.tool === 'eraser', z = view().z;
     s.pid = e.pointerId;
-    s.cur = { color:P.color, size: erase ? P.size * 3 + 6 : P.size, erase, pts:[pos(e)] };
+    // the pen keeps the same size on screen at every zoom level, so zooming in lets you write finer detail
+    s.cur = { color:P.color, size:(erase ? P.size * 3 + 6 : P.size) / z, erase, pts:[pos(e)] };
     sketchLiveSegment(false);
   });
   cv.addEventListener('pointermove', e => {
+    if(e.pointerType === 'touch' && s.ptrs.has(e.pointerId)) s.ptrs.set(e.pointerId, { x:e.clientX, y:e.clientY });
+    if(s.g){ updatePinch(); return; }
+    if(s.pan){
+      if(e.pointerId === s.pan.pid){ const p = local(e); sketchSetView(s.pan.vx + (p.x - s.pan.sx), s.pan.vy + (p.y - s.pan.sy), view().z); }
+      return;
+    }
     if(!s.cur || e.pointerId !== s.pid) return;
     const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
     (evs.length ? evs : [e]).forEach(ev => { s.cur.pts.push(pos(ev)); sketchLiveSegment(false); });
   });
   const end = e => {
+    if(e.pointerType === 'touch'){
+      s.ptrs.delete(e.pointerId);
+      if(s.g && (e.pointerId === s.g.a || e.pointerId === s.g.b)) s.g = null;
+      if(!s.ptrs.size) s.lock = false;
+    }
+    if(s.pan && e.pointerId === s.pan.pid){ s.pan = null; cv.classList.remove('is-panning'); return; }
     if(!s.cur || e.pointerId !== s.pid) return;
     sketchLiveSegment(true);
     s.entry.strokes.push(s.cur);
@@ -1985,15 +3227,40 @@ function sketchBindCanvas(){
   cv.addEventListener('pointerup', end);
   cv.addEventListener('pointercancel', end);
   cv.addEventListener('contextmenu', e => e.preventDefault());
+
+  // computers: pinch on a trackpad (or Ctrl + scroll) zooms; scrolling while zoomed in moves around
+  cv.addEventListener('wheel', e => {
+    const v = view(), k = s.k || 1;
+    if(e.ctrlKey || e.metaKey){
+      e.preventDefault();
+      const p = local(e);
+      sketchZoomBy(Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.01)), p.x, p.y);
+    } else if(v.z > 1.001){
+      e.preventDefault();
+      sketchSetView(v.x - e.deltaX / k, v.y - e.deltaY / k, v.z);
+    }
+  }, { passive:false });
+  // Safari: stop the whole page from zooming while pinching on the sketchpad
+  ['gesturestart', 'gesturechange', 'gestureend'].forEach(n => cv.addEventListener(n, e => e.preventDefault()));
+
   cv.addEventListener('keydown', e => {
-    if(!(e.ctrlKey || e.metaKey)) return;
+    if(e.key === ' ' && !s.space){ s.space = true; cv.classList.add('tool-hand'); e.preventDefault(); return; }   // hold Space + drag to move
+    if(!(e.ctrlKey || e.metaKey)){
+      if(e.key === '+' || e.key === '='){ e.preventDefault(); sketchZoomBy(1.25); }
+      else if(e.key === '-' || e.key === '_'){ e.preventDefault(); sketchZoomBy(0.8); }
+      else if(e.key === '0'){ e.preventDefault(); sketchZoomReset(); }
+      return;
+    }
     const k = e.key.toLowerCase();
     if(k === 'z'){ e.preventDefault(); e.shiftKey ? sketchRedo() : sketchUndo(); }
     else if(k === 'y'){ e.preventDefault(); sketchRedo(); }
   });
+  cv.addEventListener('keyup', e => { if(e.key === ' '){ s.space = false; sketchSyncUI(); } });
+  cv.addEventListener('blur', () => { if(s.space){ s.space = false; sketchSyncUI(); } });
+
   // hide the site's custom cursor badge while drawing so the crosshair is the only pointer
   cv.addEventListener('pointerenter', () => document.body.classList.add('sketch-hover'));
-  cv.addEventListener('pointerleave', () => { if(!s.cur) document.body.classList.remove('sketch-hover'); });
+  cv.addEventListener('pointerleave', () => { if(!s.cur && !s.pan) document.body.classList.remove('sketch-hover'); });
   cv.addEventListener('lostpointercapture', () => { if(!cv.matches(':hover')) document.body.classList.remove('sketch-hover'); });
 }
 
@@ -2028,13 +3295,10 @@ function sketchClear(){
 }
 
 /* ---------- Maximize / minimize (zoom the sketchpad to full screen and back) ---------- */
-const SK_ANIM_MS = 480;
+const SK_ANIM_MS = 420;
 function skReducedMotion(){ return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
 function skMaxRect(){
-  const vv = window.visualViewport;
-  const vw = document.documentElement.clientWidth;
-  const vh = Math.round(vv && vv.height ? vv.height : window.innerHeight);   // follows the phone's URL bar / rotation
-  const m = vw < 700 ? 0 : 16;
+  const vw = document.documentElement.clientWidth, vh = window.innerHeight, m = vw < 700 ? 0 : 16;
   return { top:m, left:m, width:vw - m * 2, height:vh - m * 2 };
 }
 function skSetGeo(card, g){
@@ -2062,20 +3326,9 @@ function sketchToggleMax(){
   if(!sketch || sketch.busy || sketch.cur) return;
   sketch.max ? sketchMinimize() : sketchMaximize();
 }
-// While the card is growing/shrinking the canvas is pinned to one fixed size and simply revealed (clipped) by the card,
-// so nothing has to be resized or redrawn on every animation frame: that is what keeps the zoom smooth.
-function skPinCanvas(w, h){
-  const cv = sketch.canvas;
-  cv.style.position = 'absolute'; cv.style.inset = '0 auto auto 0';
-  cv.style.width = w + 'px'; cv.style.height = h + 'px';
-}
-function skUnpinCanvas(){
-  const cv = sketch.canvas;
-  ['position','inset','width','height'].forEach(p => cv.style[p] = '');
-}
 function sketchMaximize(){
-  const s = sketch, card = document.querySelector('#sketchMount .sketch-card'), wrap = document.getElementById('skWrap');
-  if(!s || !card || !wrap) return;
+  const s = sketch, card = document.querySelector('#sketchMount .sketch-card');
+  if(!s || !card) return;
   s.busy = true;
   const first = card.getBoundingClientRect();
   // a placeholder keeps the page from jumping while the card floats above it
@@ -2087,63 +3340,39 @@ function sketchMaximize(){
   document.body.appendChild(bd); s.bd = bd;
   const cta = card.querySelector('.game-cta');
   if(cta) cta.style.maxHeight = cta.offsetHeight + 'px';
-
-  // 1) measure how big the writing area will be once maximized (instantly, nothing is shown)
-  card.classList.add('sk-measure');
-  skSetGeo(card, first); card.classList.add('sk-fixed');
-  void card.offsetWidth;
-  skSetGeo(card, skMaxRect()); card.classList.add('sk-open');
-  void card.offsetWidth;
-  const fw = wrap.clientWidth, fh = wrap.clientHeight;
-  // 2) back to the starting frame
-  card.classList.remove('sk-open'); skSetGeo(card, first);
-  void card.offsetWidth;
-  card.classList.remove('sk-measure');
-
-  // 3) give the canvas its final size right away, then let the card grow over it
-  s.max = true;
-  skPinCanvas(fw, fh); sketchFit();
+  skSetGeo(card, first);                         // start exactly where the card already is
+  card.style.setProperty('--sk-r', getComputedStyle(card).borderTopLeftRadius);
+  card.classList.add('sk-fixed');
+  s.max = true;                                  // from now on the canvas scales as a zoom
+  void card.offsetWidth;                         // lock in the starting frame
   document.documentElement.classList.add('sk-lock');
-  void card.offsetWidth;
   card.classList.add('sk-open'); bd.classList.add('show');
   skSetGeo(card, skMaxRect());
-  skBindResize(true);
+  window.addEventListener('resize', skOnResize);
   skSetBtn(true);
-  skAfterMove(card, () => {
-    skUnpinCanvas(); s.busy = false; sketchFit(); sketchSyncUI();
-    try{ s.canvas.focus({ preventScroll:true }); }catch(_){}
-  });
+  skAfterMove(card, () => { s.busy = false; sketchFit(); try{ s.canvas.focus({ preventScroll:true }); }catch(_){} });
 }
 function sketchMinimize(){
   const s = sketch, card = document.querySelector('#sketchMount .sketch-card');
   if(!s || !card || !s.max || !s.ph) return;
   s.busy = true;
-  skBindResize(false);
-  skPinCanvas(s.canvas.clientWidth, s.canvas.clientHeight);   // keep the big canvas while the card shrinks over it
+  window.removeEventListener('resize', skOnResize);
   const target = s.ph.getBoundingClientRect();
   card.classList.remove('sk-open');
   if(s.bd) s.bd.classList.remove('show');
   skSetGeo(card, target);
   skSetBtn(false);
   skAfterMove(card, () => {
-    s.max = false;
-    skUnpinCanvas();
     card.classList.remove('sk-fixed');
     ['top','left','width','height'].forEach(p => card.style[p] = '');
+    card.style.removeProperty('--sk-r');
     const cta = card.querySelector('.game-cta'); if(cta) cta.style.maxHeight = '';
     if(s.ph) s.ph.remove(); s.ph = null;
     if(s.bd) s.bd.remove(); s.bd = null;
     document.documentElement.classList.remove('sk-lock');
-    s.busy = false;
-    sketchFit(); sketchSyncUI();
+    s.max = false; s.busy = false;
+    sketchFit();
   });
-}
-function skOnRotate(){ setTimeout(skOnResize, 300); }     // phones report the new size a moment after rotating
-function skBindResize(on){
-  const act = on ? 'addEventListener' : 'removeEventListener';
-  window[act]('resize', skOnResize);
-  window[act]('orientationchange', skOnRotate);
-  if(window.visualViewport) window.visualViewport[act]('resize', skOnResize);
 }
 function skOnResize(){
   const card = document.querySelector('#sketchMount .sketch-card');
@@ -2152,23 +3381,11 @@ function skOnResize(){
 function sketchResetMax(){
   document.documentElement.classList.remove('sk-lock');
   document.querySelectorAll('.sk-backdrop').forEach(n => n.remove());
-  skBindResize(false);
+  window.removeEventListener('resize', skOnResize);
 }
 document.addEventListener('keydown', e => {
   if(e.key === 'Escape' && sketch && sketch.max && !sketch.busy) sketchMinimize();
 });
-
-// True when there is writing outside the small (minimized) view, e.g. done while maximized.
-function sketchOverflow(){
-  const s = sketch; if(!s || s.max) return false;
-  const e = s.entry; if(!e.w || !e.h) return false;
-  for(let i = e.strokes.length - 1; i >= 0; i--){
-    const st = e.strokes[i];
-    if(st.clear) break;
-    if(st.pts && st.pts.some(p => p.x > e.w + 6 || p.y > e.h + 6)) return true;
-  }
-  return false;
-}
 
 function sketchSyncUI(){
   const m = document.getElementById('sketchMount');
@@ -2179,11 +3396,50 @@ function sketchSyncUI(){
   m.querySelectorAll('[data-bg]').forEach(b => b.classList.toggle('active', b.dataset.bg === P.bg));
   const wrap = document.getElementById('skWrap');
   if(wrap) wrap.className = 'sk-wrap sk-bg-' + P.bg;
+  sketch.canvas.classList.toggle('tool-hand', P.tool === 'hand' || sketch.space);
+  skApplyView();
   const size = document.getElementById('skSize'), val = document.getElementById('skSizeVal');
   if(size) size.value = P.size;
   if(val) val.textContent = P.size;
-  const more = document.getElementById('skMore'); if(more) more.hidden = !sketchOverflow();
   document.getElementById('skUndo').disabled = !e.strokes.length;
   document.getElementById('skRedo').disabled = !e.redo.length;
   document.getElementById('skClear').disabled = !sketchHasInk();
 }
+
+
+/* ================= HERO: tap a BITS letter to change its color ================= */
+(function initBitsLetters(){
+  const letters = document.querySelectorAll('.hero-brand .hl');
+  if(!letters.length) return;
+  // [letter color, light tint]
+  const PALETTE = [
+    ['#E8734A', '#FFE6DA'], ['#2C8F8F', '#D6F1EC'], ['#E39A2D', '#FFF0CC'], ['#7C5CD6', '#E7DFFA'],
+    ['#E0568C', '#FDE0EA'], ['#2E86DE', '#DCEBFB'], ['#4E9F3D', '#E0F3D8'], ['#D64545', '#FBDCDC']
+  ];
+  const reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const idx = [0, 1, 2, 3];
+  function paint(el, i){
+    el.style.setProperty('--c', PALETTE[i][0]);
+    el.style.setProperty('--tint', PALETTE[i][1]);
+  }
+  letters.forEach((el, n) => {
+    paint(el, idx[n]);
+    el.addEventListener('click', () => {
+      idx[n] = (idx[n] + 1) % PALETTE.length;
+      paint(el, idx[n]);
+      el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop');
+      if(reduce) return;
+      const col = PALETTE[idx[n]][0], shapes = ['50%', '4px', '50%'];
+      for(let k = 0; k < 14; k++){
+        const sp = document.createElement('i');
+        sp.className = 'hl-spark';
+        const ang = (Math.PI * 2 * k) / 14 + Math.random() * 0.4, dist = 70 + Math.random() * 60;
+        sp.style.cssText = `--sz:${6 + Math.random() * 9}px; --sc:${k % 3 === 0 ? '#fff' : (k % 3 === 1 ? col : PALETTE[(idx[n] + 3) % PALETTE.length][0])};` +
+          `--br:${shapes[k % 3]}; --dx:${Math.cos(ang) * dist}px; --dy:${Math.sin(ang) * dist}px; --rot:${Math.round(Math.random() * 360)}deg;`;
+        el.appendChild(sp);
+        setTimeout(() => sp.remove(), 850);
+      }
+    });
+    el.addEventListener('animationend', e => { if(e.animationName === 'hl-pop') el.classList.remove('pop'); });
+  });
+})();
